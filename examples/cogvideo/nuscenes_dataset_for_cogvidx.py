@@ -393,7 +393,7 @@ class NuscenesDatasetAllframesForCogvidx(Dataset):
         command_miss_scenes = ["scene-0161", "scene-0162", "scene-0163", "scene-0164",
             "scene-0165", "scene-0166", "scene-0167", "scene-0168", "scene-0170",
             "scene-0171", "scene-0172", "scene-0173", "scene-0174",
-            "scene-0175", "scene-0176"
+            "scene-0175", "scene-0176", "scene-0419"
             ]
         
         if my_scene_name in command_miss_scenes:

@@ -11,13 +11,13 @@ accelerate launch --gpu_ids $GPU_IDS train.py \
   --validation_images "/root/diffusers/examples/cogvideo/n015-2018-07-18-11-41-49+0800__CAM_FRONT__1531885320012463.jpg:::/root/diffusers/examples/cogvideo/n015-2018-07-18-11-41-49+0800__CAM_FRONT__1531885326412466.jpg" \
   --validation_prompt_separator ::: \
   --num_validation_videos 1 \
-  --validation_epochs 10 \
+  --validation_epochs 1 \
   --seed 42 \
   --rank 128 \
   --lora_alpha 64 \
   --mixed_precision fp16 \
   --output_dir /root/autodl-fs/ckpt/cogvideo/cogvideox-lora \
-  --height 480 --width 720 --fps 8 --max_num_frames 33 \
+  --height 480 --width 720 --fps 8 --max_num_frames 49 \
   --train_batch_size 1 \
   --num_train_epochs 30 \
   --checkpointing_steps 1000 \
