@@ -1313,12 +1313,9 @@ def main(args):
                 loss = torch.mean((weights * (model_pred - target) ** 2).reshape(batch_size, -1), dim=1)
                 
                 # visu conditional loss
-                loss_detach = torch.mean(((model_pred - target) ** 2).reshape(batch_size, -1), dim=1).detach()
-                
-                loss_length = loss_detach.shape[1]
-                loss_s = torch.mean(loss_detach[:, 0])
-                loss_m = torch.mean(loss_detach[:, loss_length//2])
-                loss_e = torch.mean(loss_detach[:, -1])
+                loss_s = torch.mean((weights * (model_pred[:, 0] - target[:, 0]) ** 2)).detach()
+                loss_m = torch.mean((weights * (model_pred[:, num_frames//2] - target[:, num_frames//2]) ** 2)).detach()
+                loss_e = torch.mean((weights * (model_pred[:, -1] - target[:, -1]) ** 2)).detach()
                 
                 loss = loss.mean()
                 accelerator.backward(loss)
