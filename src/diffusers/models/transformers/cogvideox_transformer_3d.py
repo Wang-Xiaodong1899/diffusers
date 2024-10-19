@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from einops import rearrange, repeat
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
@@ -120,6 +121,7 @@ class CogVideoXBlock(nn.Module):
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        image_latent: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         text_seq_length = encoder_hidden_states.size(1)
 
@@ -127,6 +129,166 @@ class CogVideoXBlock(nn.Module):
         norm_hidden_states, norm_encoder_hidden_states, gate_msa, enc_gate_msa = self.norm1(
             hidden_states, encoder_hidden_states, temb
         )
+
+        # attention
+        attn_hidden_states, attn_encoder_hidden_states = self.attn1(
+            hidden_states=norm_hidden_states,
+            encoder_hidden_states=norm_encoder_hidden_states,
+            image_rotary_emb=image_rotary_emb,
+        )
+
+        hidden_states = hidden_states + gate_msa * attn_hidden_states
+        encoder_hidden_states = encoder_hidden_states + enc_gate_msa * attn_encoder_hidden_states
+
+        # norm & modulate
+        norm_hidden_states, norm_encoder_hidden_states, gate_ff, enc_gate_ff = self.norm2(
+            hidden_states, encoder_hidden_states, temb
+        )
+
+        # feed-forward
+        norm_hidden_states = torch.cat([norm_encoder_hidden_states, norm_hidden_states], dim=1)
+        ff_output = self.ff(norm_hidden_states)
+
+        hidden_states = hidden_states + gate_ff * ff_output[:, text_seq_length:]
+        encoder_hidden_states = encoder_hidden_states + enc_gate_ff * ff_output[:, :text_seq_length]
+
+        return hidden_states, encoder_hidden_states
+
+
+def zero_module(module):
+    """
+    Zero out the parameters of a module and return it.
+    """
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
+
+@maybe_allow_in_graph
+class CogVideoXBlockInject(nn.Module):
+    r"""
+    Transformer block used in [CogVideoX](https://github.com/THUDM/CogVideo) model.
+
+    Parameters:
+        dim (`int`):
+            The number of channels in the input and output.
+        num_attention_heads (`int`):
+            The number of heads to use for multi-head attention.
+        attention_head_dim (`int`):
+            The number of channels in each head.
+        time_embed_dim (`int`):
+            The number of channels in timestep embedding.
+        dropout (`float`, defaults to `0.0`):
+            The dropout probability to use.
+        activation_fn (`str`, defaults to `"gelu-approximate"`):
+            Activation function to be used in feed-forward.
+        attention_bias (`bool`, defaults to `False`):
+            Whether or not to use bias in attention projection layers.
+        qk_norm (`bool`, defaults to `True`):
+            Whether or not to use normalization after query and key projections in Attention.
+        norm_elementwise_affine (`bool`, defaults to `True`):
+            Whether to use learnable elementwise affine parameters for normalization.
+        norm_eps (`float`, defaults to `1e-5`):
+            Epsilon value for normalization layers.
+        final_dropout (`bool` defaults to `False`):
+            Whether to apply a final dropout after the last feed-forward layer.
+        ff_inner_dim (`int`, *optional*, defaults to `None`):
+            Custom hidden dimension of Feed-forward layer. If not provided, `4 * dim` is used.
+        ff_bias (`bool`, defaults to `True`):
+            Whether or not to use bias in Feed-forward layer.
+        attention_out_bias (`bool`, defaults to `True`):
+            Whether or not to use bias in Attention output projection layer.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_attention_heads: int,
+        attention_head_dim: int,
+        time_embed_dim: int,
+        dropout: float = 0.0,
+        activation_fn: str = "gelu-approximate",
+        attention_bias: bool = False,
+        qk_norm: bool = True,
+        norm_elementwise_affine: bool = True,
+        norm_eps: float = 1e-5,
+        final_dropout: bool = True,
+        ff_inner_dim: Optional[int] = None,
+        ff_bias: bool = True,
+        attention_out_bias: bool = True,
+    ):
+        super().__init__()
+
+        # 1. Self Attention
+        self.norm1 = CogVideoXLayerNormZero(time_embed_dim, dim, norm_elementwise_affine, norm_eps, bias=True)
+
+        self.attn1 = Attention(
+            query_dim=dim,
+            dim_head=attention_head_dim,
+            heads=num_attention_heads,
+            qk_norm="layer_norm" if qk_norm else None,
+            eps=1e-6,
+            bias=attention_bias,
+            out_bias=attention_out_bias,
+            processor=CogVideoXAttnProcessor2_0(),
+        )
+
+        # 2. Feed Forward
+        self.norm2 = CogVideoXLayerNormZero(time_embed_dim, dim, norm_elementwise_affine, norm_eps, bias=True)
+
+        self.ff = FeedForward(
+            dim,
+            dropout=dropout,
+            activation_fn=activation_fn,
+            final_dropout=final_dropout,
+            inner_dim=ff_inner_dim,
+            bias=ff_bias,
+        )
+
+        # Inject condition to hidden states
+        self.image_gamma = zero_module(nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1))
+        self.image_beta = zero_module(nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1))
+        self.image_norm = nn.LayerNorm(dim, eps=norm_eps, elementwise_affine=norm_elementwise_affine)
+    
+    def apply_norm(self, norm, x):
+        if len(x.size()) == 4:
+            return norm(x)
+        if len(x.size()) == 5:
+            b, l, _, _, _ = x.size()
+            x = rearrange(x, 'b l c h w -> (b l) c h w')
+            x = norm(x)
+            x = rearrange(x, '(b l) c h w -> b l c h w', b=b, l=l)
+            return x
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        temb: torch.Tensor,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        image_latent: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        text_seq_length = encoder_hidden_states.size(1)
+
+        # norm & modulate
+        norm_hidden_states, norm_encoder_hidden_states, gate_msa, enc_gate_msa = self.norm1(
+            hidden_states, encoder_hidden_states, temb
+        )
+        
+        if image_latent is not None:
+            batch_size = encoder_hidden_states.size(0)
+            batch_context_frames = image_latent.shape[0]
+            if batch_context_frames == batch_size:  # single-frame context: (b c h w)
+                # default is single-frame
+                image_latent = image_latent.squeeze()
+            import pdb; pdb.set_trace()
+            image_gamma = self.image_gamma(image_latent) # (b c h w)
+            image_beta = self.image_beta(image_latent) # (b c h w)
+            image_gamma = rearrange(image_gamma, 'b c h w -> b (h w) c')
+            image_beta = rearrange(image_beta, 'b c h w -> b (h w) c')
+            token_length = norm_hidden_states.shape[1]
+            image_gamma = repeat(image_gamma, 'b (h w) c -> b (l) c', l=token_length)
+            image_beta = repeat(image_beta, 'b (h w) c -> b (l) c', l=token_length)
+            norm_hidden_states = norm_hidden_states + self.image_norm(norm_hidden_states)* image_gamma + image_beta
 
         # attention
         attn_hidden_states, attn_encoder_hidden_states = self.attn1(
@@ -285,7 +447,18 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                     norm_elementwise_affine=norm_elementwise_affine,
                     norm_eps=norm_eps,
                 )
-                for _ in range(num_layers)
+                if idx >= 10 else CogVideoXBlockInject(
+                    dim=inner_dim,
+                    num_attention_heads=num_attention_heads,
+                    attention_head_dim=attention_head_dim,
+                    time_embed_dim=time_embed_dim,
+                    dropout=dropout,
+                    activation_fn=activation_fn,
+                    attention_bias=attention_bias,
+                    norm_elementwise_affine=norm_elementwise_affine,
+                    norm_eps=norm_eps,
+                )
+                for idx in range(num_layers)
             ]
         )
         self.norm_final = nn.LayerNorm(inner_dim, norm_eps, norm_elementwise_affine)
@@ -414,6 +587,7 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
+        image_latent: Optional[torch.Tensor] = None,
     ):
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -467,6 +641,7 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                     encoder_hidden_states,
                     emb,
                     image_rotary_emb,
+                    image_latent,
                     **ckpt_kwargs,
                 )
             else:
@@ -475,6 +650,7 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                     encoder_hidden_states=encoder_hidden_states,
                     temb=emb,
                     image_rotary_emb=image_rotary_emb,
+                    image_latent=image_latent
                 )
 
         if not self.config.use_rotary_positional_embeddings:
