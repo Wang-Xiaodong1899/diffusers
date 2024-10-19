@@ -1,6 +1,6 @@
 import os
 import sys
-sys.path.append("/root/diffusers/src")
+sys.path.append("/root/autodl-tmp/diffusers/src")
 
 import torch
 from diffusers import (

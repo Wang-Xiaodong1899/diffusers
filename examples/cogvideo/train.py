@@ -35,7 +35,7 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer
 
 import sys
-sys.path.append("/root/diffusers/src")
+sys.path.append("/root/autodl-tmp/diffusers/src")
 import diffusers
 from diffusers import (
     AutoencoderKLCogVideoX,
