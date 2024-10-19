@@ -23,7 +23,7 @@ accelerate launch --multi-gpu --config_file /root/autodl-tmp/diffusers/examples/
   --gradient_accumulation_steps 1 \
   --learning_rate 1e-3 \
   --lr_scheduler cosine_with_restarts \
-  --lr_warmup_steps 200 \
+  --lr_warmup_steps 100 \
   --lr_num_cycles 1 \
   --enable_slicing \
   --enable_tiling \
