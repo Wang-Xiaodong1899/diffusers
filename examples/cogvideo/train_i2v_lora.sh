@@ -14,12 +14,12 @@ accelerate launch --multi-gpu --config_file /root/diffusers/examples/cogvideo/dp
   --seed 42 \
   --rank 128 \
   --lora_alpha 64 \
-  --tracker_name cogvideo-D4 \
+  --tracker_name cogvideo-D4-loss \
   --output_dir /root/autodl-fs/ckpt/cogvideo/cogvideox-lora \
   --height 480 --width 720 --fps 8 --max_num_frames 49 \
   --train_batch_size 1 \
   --num_train_epochs 30 \
-  --checkpointing_steps 110 \
+  --checkpointing_steps 500 \
   --gradient_accumulation_steps 1 \
   --learning_rate 1e-3 \
   --lr_scheduler cosine_with_restarts \

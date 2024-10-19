@@ -1311,6 +1311,15 @@ def main(args):
                 target = video_latents
 
                 loss = torch.mean((weights * (model_pred - target) ** 2).reshape(batch_size, -1), dim=1)
+                
+                # visu conditional loss
+                loss_detach = torch.mean(((model_pred - target) ** 2).reshape(batch_size, -1), dim=1).detach()
+                
+                loss_length = loss_detach.shape[1]
+                loss_s = torch.mean(loss_detach[:, 0])
+                loss_m = torch.mean(loss_detach[:, loss_length//2])
+                loss_e = torch.mean(loss_detach[:, -1])
+                
                 loss = loss.mean()
                 accelerator.backward(loss)
 
@@ -1366,7 +1375,11 @@ def main(args):
 
                         logger.info(f"Saved state to {save_path}")
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"loss": loss.detach().item(),
+                    "loss_s": loss_s.detach().item(),
+                    "loss_m": loss_m.detach().item(),
+                    "loss_e": loss_e.detach().item(),
+                    "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
