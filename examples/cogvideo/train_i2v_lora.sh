@@ -14,7 +14,7 @@ accelerate launch --multi-gpu --config_file /root/diffusers/examples/cogvideo/dp
   --seed 42 \
   --rank 128 \
   --lora_alpha 64 \
-  --tracker_name cogvideo-D4-loss \
+  --tracker_name cogvideo-D4-clean-image \
   --output_dir /root/autodl-fs/ckpt/cogvideo/cogvideox-lora \
   --height 480 --width 720 --fps 8 --max_num_frames 49 \
   --train_batch_size 1 \
@@ -34,4 +34,5 @@ accelerate launch --multi-gpu --config_file /root/diffusers/examples/cogvideo/dp
   --allow_tf32 \
   --report_to wandb \
   --gradient_checkpointing \
+  --denoised_image \
   # --dataloader_num_workers 16 \

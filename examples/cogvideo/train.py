@@ -363,6 +363,12 @@ def get_args():
         default=0.05,
         help="Image condition dropout probability.",
     )
+    parser.add_argument(
+        "--denoised_image",
+        action="store_true",
+        default=False,
+        help="use the clean first image",
+    )
 
     # Optimizer
     parser.add_argument(
@@ -1062,6 +1068,8 @@ def main(args):
         image_noise_sigma = torch.normal(mean=-3.0, std=0.5, size=(1,), device=image.device)
         image_noise_sigma = torch.exp(image_noise_sigma).to(dtype=image.dtype)
         noisy_image = torch.randn_like(image) * image_noise_sigma[:, None, None, None, None] + image
+        if args.denoised_image:
+            noisy_image = image
         image_latent_dist = vae.encode(noisy_image).latent_dist
 
         return latent_dist, image_latent_dist
