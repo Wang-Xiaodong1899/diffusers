@@ -272,7 +272,7 @@ class NuscenesDatasetAllframesForCogvidx(Dataset):
 
     
     def __len__(self):
-        return len(self.samples)
+        return 400 #len(self.samples)
 
     def augmentation(self, frame, transform, state):
         torch.set_rng_state(state)
@@ -402,9 +402,11 @@ class NuscenesDatasetAllframesForCogvidx(Dataset):
             try:
                 driving_prompt = self.command_dict[my_scene_name][command_idx]
             except:
-                import pdb; pdb.set_trace()
-            # driving_prompt = driving_prompt + ". " + caption
-            # print(driving_prompt)
+                # import pdb; pdb.set_trace()
+                driving_prompt = ""
+                pass
+        driving_prompt = driving_prompt + ". " + caption
+        # print(driving_prompt)
 
         frames = torch.Tensor(np.stack([image2arr(path) for path in frame_paths]))
 
@@ -444,18 +446,22 @@ class NuscenesDatasetAllframesForCogvidx(Dataset):
             self.instance_videos.append(video)
         
     def __getitem__(self, index):
-        if self.preload_all_data:
-            return {
-                "instance_prompt": self.instance_prompts[index],
-                "instance_video": self.instance_videos[index],
-            }
-        else:
-            prompt, video = self.load_sample(index)
-            prompt, video = self.encode(prompt, video)
-            return {
-                "instance_prompt": prompt,
-                "instance_video": video,
-            }
+        try:
+            if self.preload_all_data:
+                return {
+                    "instance_prompt": self.instance_prompts[index],
+                    "instance_video": self.instance_videos[index],
+                }
+            else:
+                prompt, video = self.load_sample(index)
+                prompt, video = self.encode(prompt, video)
+                return {
+                    "instance_prompt": prompt,
+                    "instance_video": video,
+                }
+        except Exception as e:
+            print('Bad idx %s skipped because of %s' % (index, e))
+            return self.__getitem__(np.random.randint(0, self.__len__() - 1))
 
 
 # if __name__ == "__main__":

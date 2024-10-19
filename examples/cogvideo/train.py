@@ -886,8 +886,6 @@ def main(args):
         in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
     
-    
-
     vae = AutoencoderKLCogVideoX.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant, 
     )
@@ -922,8 +920,10 @@ def main(args):
     else:
         if accelerator.mixed_precision == "fp16":
             weight_dtype = torch.float16
+            args.mixed_precision = accelerator.mixed_precision 
         elif accelerator.mixed_precision == "bf16":
             weight_dtype = torch.bfloat16
+            args.mixed_precision = accelerator.mixed_precision 
 
     if torch.backends.mps.is_available() and weight_dtype == torch.bfloat16:
         # due to pytorch#99272, MPS does not yet support bfloat16.
@@ -961,13 +961,16 @@ def main(args):
             transformer_lora_layers_to_save = None
 
             for model in models:
+                if accelerator.distributed_type == DistributedType.DEEPSPEED:
+                    model = unwrap_model(model)
                 if isinstance(model, type(unwrap_model(transformer))):
                     transformer_lora_layers_to_save = get_peft_model_state_dict(model)
                 else:
                     raise ValueError(f"unexpected save model: {model.__class__}")
 
-                # make sure to pop weight so that corresponding model is not saved again
-                weights.pop()
+                if accelerator.distributed_type != DistributedType.DEEPSPEED:
+                    # make sure to pop weight so that corresponding model is not saved again
+                    weights.pop()
 
             CogVideoXImageToVideoPipeline.save_lora_weights(
                 output_dir,
@@ -1022,7 +1025,8 @@ def main(args):
         )
 
     ### !!!! train transformer.patch_embed.proj
-    transformer.patch_embed.proj.requires_grad_(True)
+    transformer.patch_embed.proj.weight.requires_grad_(True)
+    transformer.patch_embed.proj.bias.requires_grad_(True)
 
     # Make sure the trainable params are in float32.
     if args.mixed_precision == "fp16":
@@ -1030,6 +1034,8 @@ def main(args):
         cast_training_params([transformer], dtype=torch.float32)
     
     transformer_lora_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+
+    # import pdb; pdb.set_trace()
 
     # Optimization parameters
     transformer_parameters_with_lr = {"params": transformer_lora_parameters, "lr": args.learning_rate}
@@ -1309,7 +1315,10 @@ def main(args):
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
-                    params_to_clip = transformer.parameters()
+                    # params_to_clip = transformer.parameters()
+                    params_to_clip = transformer_lora_parameters
+                    # import pdb; pdb.set_trace()
+                    # print(f"grad: {params_to_clip[0].grad}")
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                 if accelerator.state.deepspeed_plugin is None:
@@ -1375,7 +1384,6 @@ def main(args):
                     revision=args.revision,
                     variant=args.variant,
                     torch_dtype=weight_dtype,
-
                     vae = vae,
                     text_encoder=text_encoder
                 )
