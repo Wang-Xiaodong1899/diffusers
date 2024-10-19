@@ -272,7 +272,7 @@ class NuscenesDatasetAllframesForCogvidx(Dataset):
 
     
     def __len__(self):
-        return 400 #len(self.samples)
+        return len(self.samples)
 
     def augmentation(self, frame, transform, state):
         torch.set_rng_state(state)
