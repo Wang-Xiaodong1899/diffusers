@@ -15,7 +15,7 @@ accelerate launch --multi-gpu --config_file /workspace/wxd/diffusers/examples/co
   --tracker_name cogvideo-A4-clean-image-sft \
   --output_dir /volsparse2/wxd/ckpt/cogvideo/cogvideox-A4-clean-image-sft1 \
   --height 480 --width 720 --fps 8 --max_num_frames 33 \
-  --train_batch_size 16 \
+  --train_batch_size 2 \
   --num_train_epochs 1000 \
   --checkpointing_steps 1000 \
   --gradient_accumulation_steps 1 \
