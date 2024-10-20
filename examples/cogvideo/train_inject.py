@@ -291,7 +291,7 @@ def get_args():
     parser.add_argument(
         "--checkpoints_total_limit",
         type=int,
-        default=None,
+        default=2,
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
@@ -889,7 +889,7 @@ def main(args):
         torch_dtype=load_dtype,
         revision=args.revision,
         variant=args.variant,
-        in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
+        in_channels=16, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
     
     vae = AutoencoderKLCogVideoX.from_pretrained(
@@ -1031,8 +1031,12 @@ def main(args):
         )
 
     ### !!!! train transformer.patch_embed.proj
-    transformer.patch_embed.proj.weight.requires_grad_(True)
-    transformer.patch_embed.proj.bias.requires_grad_(True)
+    # transformer.patch_embed.proj.weight.requires_grad_(True)
+    # transformer.patch_embed.proj.bias.requires_grad_(True)
+    
+    for name, param in transformer.named_parameters():
+        if 'image_beta' in name or 'image_gamma' in name or 'image_norm' in name:
+            param.requires_grad = True
 
     # Make sure the trainable params are in float32.
     if args.mixed_precision == "fp16":
@@ -1071,7 +1075,7 @@ def main(args):
         if args.denoised_image:
             noisy_image = image
         image_latent_dist = vae.encode(noisy_image).latent_dist
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
 
         return latent_dist, image_latent_dist
     
@@ -1230,9 +1234,10 @@ def main(args):
             # print(p1)
             accelerator.load_state(os.path.join(args.output_dir, path))
             from safetensors.torch import load_file
-            transformer_patch_embed_proj = load_file(os.path.join(os.path.join(args.output_dir, path),"transformer_patch_embed_proj.safetensors"))
-            unwrap_model(transformer).patch_embed.proj.weight.data = transformer_patch_embed_proj['transformer.patch_embed.proj.weight']
-            unwrap_model(transformer).patch_embed.proj.bias.data = transformer_patch_embed_proj['transformer.patch_embed.proj.bias']
+            loaded_weights = load_file(os.path.join(os.path.join(args.output_dir, path),"transformer_inject.safetensors"))
+            for name, param in unwrap_model(transformer).named_parameters():
+                if name in loaded_weights:
+                    param.data.copy_(loaded_weights[name])
             # p2 = unwrap_model(transformer).patch_embed.proj.weight
             # print(p2)
             # with torch.no_grad():
@@ -1379,10 +1384,8 @@ def main(args):
                         accelerator.save_state(save_path)
 
                         from safetensors.torch import save_file
-                        save_file({
-                                "transformer.patch_embed.proj.weight" : unwrap_model(transformer).patch_embed.proj.weight,
-                                "transformer.patch_embed.proj.bias" : unwrap_model(transformer).patch_embed.proj.bias,
-                            }, os.path.join(save_path, "transformer_patch_embed_proj.safetensors"))
+                        saved_items = {name: param.detach().cpu() for name, param in unwrap_model(transformer).named_parameters() if 'image_gamma' in name or 'image_beta' in name or 'image_norm' in name}
+                        save_file(saved_items, os.path.join(save_path, "transformer_inject.safetensors"))
 
                         logger.info(f"Saved state to {save_path}")
 
@@ -1409,7 +1412,8 @@ def main(args):
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                     vae = vae,
-                    text_encoder=text_encoder
+                    text_encoder=text_encoder,
+                    inject=True,
                 )
 
                 validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
@@ -1493,9 +1497,10 @@ def main(args):
         pipe.set_adapters(["cogvideox-i2v-lora"], [lora_scaling])
 
         from safetensors.torch import load_file
-        transformer_patch_embed_proj = load_file(os.path.join(os.path.join(args.output_dir, path),"transformer_patch_embed_proj.safetensors"))
-        transformer_.patch_embed.proj.weight.data = transformer_patch_embed_proj['transformer.patch_embed.proj.weight']
-        transformer_.patch_embed.proj.bias.data = transformer_patch_embed_proj['transformer.patch_embed.proj.bias']
+        loaded_weights = load_file(os.path.join(os.path.join(args.output_dir, path),"transformer_inject.safetensors"))
+        for name, param in transformer_.named_parameters():
+            if name in loaded_weights:
+                param.data.copy_(loaded_weights[name])
 
         # Run inference
         validation_outputs = []

@@ -245,9 +245,9 @@ class CogVideoXBlockInject(nn.Module):
         )
 
         # Inject condition to hidden states
-        self.image_gamma = zero_module(nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1))
-        self.image_beta = zero_module(nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1))
-        self.image_norm = nn.LayerNorm(dim, eps=norm_eps, elementwise_affine=norm_elementwise_affine)
+        # self.image_gamma = zero_module(nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1))
+        # self.image_beta = zero_module(nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1))
+        # self.image_norm = nn.LayerNorm(dim, eps=norm_eps, elementwise_affine=norm_elementwise_affine)
     
     def apply_norm(self, norm, x):
         if len(x.size()) == 4:
@@ -279,15 +279,15 @@ class CogVideoXBlockInject(nn.Module):
             batch_context_frames = image_latent.shape[0]
             if batch_context_frames == batch_size:  # single-frame context: (b c h w)
                 # default is single-frame
-                image_latent = image_latent.squeeze()
-            import pdb; pdb.set_trace()
+                image_latent = image_latent.squeeze(1)
+            # import pdb; pdb.set_trace()
             image_gamma = self.image_gamma(image_latent) # (b c h w)
             image_beta = self.image_beta(image_latent) # (b c h w)
             image_gamma = rearrange(image_gamma, 'b c h w -> b (h w) c')
             image_beta = rearrange(image_beta, 'b c h w -> b (h w) c')
             token_length = norm_hidden_states.shape[1]
-            image_gamma = repeat(image_gamma, 'b (h w) c -> b (l) c', l=token_length)
-            image_beta = repeat(image_beta, 'b (h w) c -> b (l) c', l=token_length)
+            image_gamma = repeat(image_gamma, 'b x c -> b (x n) c', n=token_length//image_gamma.shape[1])
+            image_beta = repeat(image_beta, 'b x c -> b (x n) c', n=token_length//image_beta.shape[1])
             norm_hidden_states = norm_hidden_states + self.image_norm(norm_hidden_states)* image_gamma + image_beta
 
         # attention
@@ -623,7 +623,14 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         text_seq_length = encoder_hidden_states.shape[1]
         encoder_hidden_states = hidden_states[:, :text_seq_length]
         hidden_states = hidden_states[:, text_seq_length:]
-
+        
+        if image_latent is not None:
+            # XXX prepare image_latent
+            image_latent = image_latent.reshape(-1, *image_latent.shape[2:])
+            image_latent = self.patch_embed.proj(image_latent)
+            image_latent = image_latent.view(batch_size, 1, *image_latent.shape[1:])
+            # image_latent = image_latent.flatten(3).transpose(2, 3)  # [batch, num_frames, height x width, channels]
+        
         # 3. Transformer blocks
         for i, block in enumerate(self.transformer_blocks):
             if self.training and self.gradient_checkpointing:

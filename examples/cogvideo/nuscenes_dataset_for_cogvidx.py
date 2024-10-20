@@ -267,6 +267,16 @@ class NuscenesDatasetAllframesForCogvidx(Dataset):
             with open(command_path, 'r') as f:
                 self.command_dict = json.load(f)
             
+            # image transform
+            self.transform = TT.Compose([
+                    TT.ToPILImage('RGB'),
+                    TT.RandomResizedCrop((height, width), scale=(0.5, 1.), ratio=(1., 1.75)),
+                    # transforms.RandomHorizontalFlip(p=0.1),
+                    TT.ColorJitter(brightness=0.05, contrast=0.15, saturation=0.15),
+                    TT.ToTensor(),
+                    TT.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5], inplace=True),
+                ])
+            
             if preload_all_data:
                 self.preload()
 
@@ -408,16 +418,22 @@ class NuscenesDatasetAllframesForCogvidx(Dataset):
         driving_prompt = driving_prompt + ". " + caption
         # print(driving_prompt)
 
-        frames = torch.Tensor(np.stack([image2arr(path) for path in frame_paths]))
+        # frames = torch.Tensor(np.stack([image2arr(path) for path in frame_paths]))
+        frames = np.stack([image2arr(path) for path in frame_paths])
 
         selected_num_frames = frames.shape[0]
 
         assert (selected_num_frames - 1) % 4 == 0
 
         # Training transforms
-        frames = (frames - 127.5) / 127.5
-        frames = frames.permute(0, 3, 1, 2) # [F, C, H, W]
-        frames = resize(frames,size=[self.height, self.width],interpolation=InterpolationMode.BICUBIC)
+        
+        # no aug
+        # frames = (frames - 127.5) / 127.5
+        # frames = frames.permute(0, 3, 1, 2) # [F, C, H, W]
+        # frames = resize(frames,size=[self.height, self.width],interpolation=InterpolationMode.BICUBIC)
+        # NOTE aug, pil -> tensor
+        state = torch.get_rng_state()
+        frames = torch.stack([self.augmentation(v, self.transform, state) for v in frames], dim=0)
 
         return driving_prompt, frames
 

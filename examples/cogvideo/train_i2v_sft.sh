@@ -1,6 +1,6 @@
 #!/bin/bash
 
-accelerate launch --multi-gpu --config_file /root/autodl-tmp/diffusers/examples/cogvideo/dp.yaml sft.py \
+accelerate launch --config_file /root/autodl-tmp/diffusers/examples/cogvideo/dp.yaml sft.py \
   --mixed_precision="fp16" \
   --pretrained_model_name_or_path /root/autodl-fs/models/CogVideoX-2b \
   --cache_dir /root/autodl-tmp/cache \
@@ -10,15 +10,13 @@ accelerate launch --multi-gpu --config_file /root/autodl-tmp/diffusers/examples/
   --validation_images "/root/autodl-tmp/diffusers/examples/cogvideo/n015-2018-07-18-11-41-49+0800__CAM_FRONT__1531885320012463.jpg" \
   --validation_prompt_separator ::: \
   --num_validation_videos 1 \
-  --validation_epochs 1 \
+  --validation_epochs 5 \
   --seed 42 \
-  --rank 128 \
-  --lora_alpha 64 \
-  --tracker_name cogvideo-D4-clean-image \
-  --output_dir /root/autodl-fs/ckpt/cogvideo/cogvideox-lora \
+  --tracker_name cogvideo-D4-clean-image-sft \
+  --output_dir /root/autodl-fs/ckpt/cogvideo/cogvideox-D4-clean-image-sft1 \
   --height 480 --width 720 --fps 8 --max_num_frames 33 \
-  --train_batch_size 1 \
-  --num_train_epochs 30 \
+  --train_batch_size 2 \
+  --num_train_epochs 50 \
   --checkpointing_steps 500 \
   --gradient_accumulation_steps 1 \
   --learning_rate 1e-5 \

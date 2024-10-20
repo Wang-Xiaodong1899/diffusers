@@ -1,6 +1,6 @@
 #!/bin/bash
 
-accelerate launch --multi-gpu --config_file /root/autodl-tmp/diffusers/examples/cogvideo/dp.yaml train_inject.py \
+accelerate launch --config_file /root/autodl-tmp/diffusers/examples/cogvideo/dp.yaml train_inject.py \
   --mixed_precision="fp16" \
   --pretrained_model_name_or_path /root/autodl-fs/models/CogVideoX-2b \
   --cache_dir /root/autodl-tmp/cache \
@@ -14,14 +14,14 @@ accelerate launch --multi-gpu --config_file /root/autodl-tmp/diffusers/examples/
   --seed 42 \
   --rank 128 \
   --lora_alpha 64 \
-  --tracker_name cogvideo-D1-Inject \
-  --output_dir /root/autodl-fs/ckpt/cogvideo/cogvideox-lora-inject \
+  --tracker_name cogvideo-D8-Inject \
+  --output_dir /root/autodl-tmp/ckpt/cogvideo/cogvideox-lora-inject-D8 \
   --height 480 --width 720 --fps 8 --max_num_frames 49 \
   --train_batch_size 1 \
-  --num_train_epochs 30 \
-  --checkpointing_steps 500 \
+  --num_train_epochs 200 \
+  --checkpointing_steps 10000 \
   --gradient_accumulation_steps 1 \
-  --learning_rate 1e-3 \
+  --learning_rate 5e-5 \
   --lr_scheduler cosine_with_restarts \
   --lr_warmup_steps 100 \
   --lr_num_cycles 1 \

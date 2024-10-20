@@ -24,6 +24,8 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import transformers
+import accelerate
+from accelerate.state import AcceleratorState
 from accelerate import Accelerator, DistributedType
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs, ProjectConfiguration, set_seed
@@ -33,6 +35,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer
+from transformers.utils import ContextManagers
 
 import sys
 sys.path.append("/root/autodl-tmp/diffusers/src")
@@ -874,10 +877,24 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, 
     )
+    
+    def deepspeed_zero_init_disabled_context_manager():
+        """
+        returns either a context list that includes one that will disable zero.Init or an empty context list
+        """
+        deepspeed_plugin = AcceleratorState().deepspeed_plugin if accelerate.state.is_initialized() else None
+        if deepspeed_plugin is None:
+            return []
 
-    text_encoder = T5EncoderModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, 
-    )
+        return [deepspeed_plugin.zero3_init_context_manager(enable=False)]
+    
+    with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
+        text_encoder = T5EncoderModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, 
+        )
+        vae = AutoencoderKLCogVideoX.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant, 
+        )
 
     # CogVideoX-2b weights are stored in float16
     # CogVideoX-5b and CogVideoX-5b-I2V weights are stored in bfloat16
@@ -892,10 +909,6 @@ def main(args):
         in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
     
-    vae = AutoencoderKLCogVideoX.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant, 
-    )
-
     scheduler = CogVideoXDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler",)
 
     if args.enable_slicing:
@@ -905,8 +918,8 @@ def main(args):
 
     # We only train the additional adapter LoRA layers
     text_encoder.requires_grad_(False)
-    # transformer.requires_grad_(False)
     vae.requires_grad_(False)
+    transformer.requires_grad_(True)
 
     # For mixed precision training we cast all non-trainable weights (vae, text_encoder and transformer) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
@@ -1009,7 +1022,8 @@ def main(args):
         # only upcast trainable parameters (LoRA) into fp32
         cast_training_params([transformer], dtype=torch.float32)
     
-    trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+    # trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+    trainable_parameters = list(transformer.parameters())
 
     # import pdb; pdb.set_trace()
 
