@@ -38,7 +38,8 @@ from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer
 from transformers.utils import ContextManagers
 
 import sys
-sys.path.append("/root/autodl-tmp/diffusers/src")
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'src'))
+
 import diffusers
 from diffusers import (
     AutoencoderKLCogVideoX,
