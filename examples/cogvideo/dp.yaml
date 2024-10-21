@@ -25,7 +25,7 @@ main_training_function: main
 dynamo_backend: 'no'
 mixed_precision: 'no'
 num_machines: 1
-num_processes: 4
+num_processes: 3
 rdzv_backend: static
 same_network: true
 use_cpu: false
