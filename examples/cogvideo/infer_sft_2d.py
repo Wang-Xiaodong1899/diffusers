@@ -6,11 +6,16 @@ import torch
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
-    CogVideoXTransformer3DModel,
 )
+
+from diffusers.models.transformers.cogvideox_transformer_2d import CogVideoXTransformer2DModel
+# from diffusers.models.transformers.cogvideox_transformer_3d import CogVideoXTransformer3DModel
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_clip2image import CogVideoXImageToVideoPipeline
+
+
 from diffusers.utils import load_image, export_to_video
-from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer
+from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer, CLIPModel, CLIPImageProcessor
+
 
 from safetensors.torch import load_file
 
@@ -26,14 +31,13 @@ text_encoder = T5EncoderModel.from_pretrained(
     torch_dtype=torch.float16,
 )
 
-transformer = CogVideoXTransformer3DModel.from_pretrained(
-        "/data/wangxd/ckpt/cogvideox-A2-clean-image-inject-1128-inherit1022/checkpoint-3000",
+transformer = CogVideoXTransformer2DModel.from_pretrained(
+        "/data/wangxd/ckpt/cogvideox-2d-clip2image-continue/checkpoint-5000",
         subfolder="transformer",
-        # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=torch.float16,
         revision=None,
         variant=None,
-        in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
+        in_channels=16, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
 
 vae = AutoencoderKLCogVideoX.from_pretrained(
@@ -43,12 +47,19 @@ vae = AutoencoderKLCogVideoX.from_pretrained(
 
 scheduler = CogVideoXDPMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler",)
 
+clip_model = CLIPModel.from_pretrained(
+            "/data/wangxd/models/CLIP-ViT-H-14-laion2B-s32B-b79K", torch_dtype=torch.float16)
+
+feature_extractor = CLIPImageProcessor.from_pretrained('/home/user/wangxd/SVD/smodels/image-keyframes-s448-ep100-resumefrom50', subfolder="feature_extractor")
+
 components = {
             "transformer": transformer,
             "vae": vae,
             "scheduler": scheduler,
             "text_encoder": text_encoder,
             "tokenizer": tokenizer,
+            "feature_extractor": feature_extractor,
+            "clip_model": clip_model
         }
 
 pipe = CogVideoXImageToVideoPipeline(**components)
@@ -58,25 +69,19 @@ pipe.vae.enable_tiling()
 
 print('Pipeline loaded!')
 
-rollout = 3
-
 while True:
     image_path = input("image_path: ")
     validation_prompt = input("prompt: ")
     guidance_scale = input("cfg: ") # 6
-    total_frames = []
-    for r in range(rollout):
-        pipeline_args = {
-            "image": load_image(image_path) if r==0 else total_frames[-1],
-            "prompt": validation_prompt,
-            "guidance_scale": int(guidance_scale),
-            "use_dynamic_cfg": True,
-            "height": 480,
-            "width": 720,
-            "num_frames": 33
-        }
-        frames = pipe(**pipeline_args).frames[0]
-        total_frames.extend(frames if r==(rollout-1) else frames[:-1])
+    pipeline_args = {
+        "image": load_image(image_path),
+        "prompt": validation_prompt,
+        "guidance_scale": int(guidance_scale),
+        "use_dynamic_cfg": True,
+        "height": 480,
+        "width": 720,
+        "num_frames": 33
+    }
     name_prefix = validation_prompt.replace(" ", "_").strip()[:40]
-    
-    export_to_video(total_frames, f"{name_prefix}_cfg_{guidance_scale}_roll_{rollout}_1128_3k.mp4", fps=8)
+    frames = pipe(**pipeline_args).frames[0]
+    frames[0].save("2d_img_5k.jpg")

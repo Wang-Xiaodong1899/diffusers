@@ -44,9 +44,13 @@ import diffusers
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
-    CogVideoXTransformer3DModel,
 )
+
+from diffusers.models.transformers.cogvideox_transformer_3d_interpolate import CogVideoXTransformer3DModel
+
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_image2video_interpolate import CogVideoXImageToVideoPipeline
+
+
 from diffusers.models.embeddings import get_3d_rotary_pos_embed
 from diffusers.optimization import get_scheduler
 from diffusers.pipelines.cogvideo.pipeline_cogvideox import get_resize_crop_region_for_grid
@@ -66,7 +70,7 @@ import torchvision.transforms as TT
 import numpy as np
 from diffusers.image_processor import VaeImageProcessor
 
-from nuscenes_dataset_for_cogvidx import NuscenesDatasetAllframesForCogvidx
+from opendv_dataset_for_cogvidx import OpenDVFPS2OForCogvidx
 
 
 if is_wandb_available():
@@ -253,7 +257,7 @@ def get_args():
     )
     parser.add_argument("--fps", type=int, default=8, help="All input videos will be used at this FPS.")
     parser.add_argument(
-        "--max_num_frames", type=int, default=49, help="All input videos will be truncated to these many frames."
+        "--max_num_frames", type=int, default=13, help="All input videos will be truncated to these many frames."
     )
     parser.add_argument(
         "--skip_frames_start",
@@ -301,7 +305,7 @@ def get_args():
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
-        default=None,
+        default="latest",
         help=(
             "Whether training should be resumed from a previous checkpoint. Use a path saved by"
             ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
@@ -903,12 +907,22 @@ def main(args):
     transformer = CogVideoXTransformer3DModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="transformer",
-        # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=load_dtype,
         revision=args.revision,
         variant=args.variant,
         in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
+    
+    from safetensors import safe_open
+    tensors = {}
+    with safe_open(os.path.join("/home/user/wangxd/diffusers/CogVideoX-2b/transformer", "diffusion_pytorch_model.safetensors"), framework="pt", device='cpu') as f:
+        for k in f.keys():
+            if "patch_embed.proj" in k:
+                nk = k.replace("proj", "origin_proj")
+                tensors[nk] = f.get_tensor(k)
+                print(k)
+    
+    transformer.load_state_dict(tensors, strict=False)
     
     scheduler = CogVideoXDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler",)
 
@@ -1025,6 +1039,15 @@ def main(args):
     
     # trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     trainable_parameters = list(transformer.parameters())
+    
+    # # NOTE XXX overwrite for DEBUG
+    # optimize_param = []
+    # for name, param in transformer.named_parameters():
+    #     param.requires_grad = False
+    #     if "proj" in name and "text" not in name:
+    #         param.requires_grad = True
+    #         optimize_param.append(param)
+    # trainable_parameters = optimize_param
 
     # import pdb; pdb.set_trace()
 
@@ -1047,6 +1070,7 @@ def main(args):
         video = video.to(accelerator.device, dtype=vae.dtype).unsqueeze(0)
         video = video.permute(0, 2, 1, 3, 4)  # [B, C, F, H, W]
         image = video[:, :, :1].clone()
+        last_image = video[:, :, -1:].clone()
 
         latent_dist = vae.encode(video).latent_dist
 
@@ -1056,8 +1080,13 @@ def main(args):
         if args.denoised_image:
             noisy_image = image
         image_latent_dist = vae.encode(noisy_image).latent_dist
+        
+        noisy_last_image = torch.randn_like(last_image) * image_noise_sigma[:, None, None, None, None] + last_image
+        if args.denoised_image:
+            noisy_last_image = last_image
+        last_image_latent_dist = vae.encode(noisy_last_image).latent_dist
 
-        return latent_dist, image_latent_dist
+        return latent_dist, image_latent_dist, last_image_latent_dist
     
     def encode_prompt(prompt):
         return compute_prompt_embeddings(
@@ -1071,7 +1100,7 @@ def main(args):
         )
     
     # Dataset and DataLoader
-    train_dataset = NuscenesDatasetAllframesForCogvidx(
+    train_dataset = OpenDVFPS2OForCogvidx(
         data_root=args.instance_data_root,
         height=args.height,
         width=args.width,
@@ -1085,22 +1114,26 @@ def main(args):
         videos = []
         images = []
         for example in examples:
-            latent_dist, image_latent_dist = example["instance_video"]
+            latent_dist, image_latent_dist, last_image_latent_dist = example["instance_video"]
 
             latent_dist = latent_dist.to(accelerator.device)
             image_latent_dist = image_latent_dist.to(accelerator.device)
+            last_image_latent_dist = last_image_latent_dist.to(accelerator.device)
 
             # video_latents = latent_dist.sample() * vae.config.scaling_factor
             # image_latents = image_latent_dist.sample() * vae.config.scaling_factor
             video_latents = latent_dist * vae.config.scaling_factor
             image_latents = image_latent_dist * vae.config.scaling_factor
+            last_image_latents = last_image_latent_dist * vae.config.scaling_factor
 
             video_latents = video_latents.permute(0, 2, 1, 3, 4)
             image_latents = image_latents.permute(0, 2, 1, 3, 4)
+            last_image_latents = last_image_latents.permute(0, 2, 1, 3, 4)
 
-            padding_shape = (video_latents.shape[0], video_latents.shape[1] - 1, *video_latents.shape[2:])
+            # pad - 2
+            padding_shape = (video_latents.shape[0], video_latents.shape[1] - 2, *video_latents.shape[2:])
             latent_padding = image_latents.new_zeros(padding_shape)
-            image_latents = torch.cat([image_latents, latent_padding], dim=1) # copy and repeat
+            image_latents = torch.cat([image_latents, latent_padding, last_image_latents], dim=1) # copy and repeat
 
             if random.random() < args.noised_image_dropout:
                 image_latents = torch.zeros_like(image_latents)
@@ -1273,7 +1306,10 @@ def main(args):
                     if model_config.use_rotary_positional_embeddings
                     else None
                 )
-
+                
+                
+                image_latent = image_latents[:, :1] # take the first frame
+                last_image_latent = image_latents[:, -1:]
                 # Predict the noise residual
                 model_output = transformer(
                     hidden_states=noisy_model_input,
@@ -1281,6 +1317,8 @@ def main(args):
                     timestep=timesteps,
                     image_rotary_emb=image_rotary_emb,
                     return_dict=False,
+                    image_latent = image_latent,
+                    last_image_latent = last_image_latent,
                 )[0]
                 model_pred = scheduler.get_velocity(model_output, noisy_video_latents, timesteps)
 
@@ -1369,32 +1407,34 @@ def main(args):
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                     vae = vae,
-                    text_encoder=text_encoder
+                    text_encoder=text_encoder,
+                    inject=True
                 )
 
                 validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
                 validation_images = args.validation_images.split(args.validation_prompt_separator)
 
                 # for validation_image, validation_prompt in zip(validation_images, validation_prompts):
-                for validation_image in validation_images:
-                    for validation_prompt in validation_prompts:
-                        pipeline_args = {
-                            "image": load_image(validation_image),
-                            "prompt": validation_prompt,
-                            "guidance_scale": args.guidance_scale,
-                            "use_dynamic_cfg": args.use_dynamic_cfg,
-                            "height": args.height,
-                            "width": args.width,
-                            "num_frames": args.max_num_frames
-                        }
+                # for validation_image in validation_images:
+                for validation_prompt in validation_prompts:
+                    pipeline_args = {
+                        "image": load_image(validation_images[0]),
+                        "last_image": load_image(validation_images[1]),
+                        "prompt": validation_prompt,
+                        "guidance_scale": args.guidance_scale,
+                        "use_dynamic_cfg": args.use_dynamic_cfg,
+                        "height": args.height,
+                        "width": args.width,
+                        "num_frames": args.max_num_frames
+                    }
 
-                        validation_outputs = log_validation(
-                            pipe=pipe,
-                            args=args,
-                            accelerator=accelerator,
-                            pipeline_args=pipeline_args,
-                            epoch=epoch,
-                        )
+                    validation_outputs = log_validation(
+                        pipe=pipe,
+                        args=args,
+                        accelerator=accelerator,
+                        pipeline_args=pipeline_args,
+                        epoch=epoch,
+                    )
 
     # Save the lora layers
     accelerator.wait_for_everyone()

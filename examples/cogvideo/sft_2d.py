@@ -45,8 +45,10 @@ from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
     CogVideoXImageToVideoPipeline,
-    CogVideoXTransformer3DModel,
 )
+
+from diffusers.models.transformers.cogvideox_transformer_2d import CogVideoXTransformer2DModel
+
 from diffusers.models.embeddings import get_3d_rotary_pos_embed
 from diffusers.optimization import get_scheduler
 from diffusers.pipelines.cogvideo.pipeline_cogvideox import get_resize_crop_region_for_grid
@@ -66,7 +68,7 @@ import torchvision.transforms as TT
 import numpy as np
 from diffusers.image_processor import VaeImageProcessor
 
-from nuscenes_dataset_for_cogvidx import NuscenesDatasetAllframesForCogvidx
+from nuscenes_dataset_for_cogvidx import NuscenesDatasetCLIPForCogvidx
 
 
 if is_wandb_available():
@@ -896,18 +898,27 @@ def main(args):
         vae = AutoencoderKLCogVideoX.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant, 
         )
+        #NOTE add clip vision model
+        clip_model = transformers.CLIPModel.from_pretrained(
+            "/data/wangxd/models/CLIP-ViT-H-14-laion2B-s32B-b79K", torch_dtype=torch.float16)
+
 
     # CogVideoX-2b weights are stored in float16
     # CogVideoX-5b and CogVideoX-5b-I2V weights are stored in bfloat16
     load_dtype = torch.bfloat16 if "5b" in args.pretrained_model_name_or_path.lower() else torch.float16
-    transformer = CogVideoXTransformer3DModel.from_pretrained(
-        args.pretrained_model_name_or_path,
+    
+    # train from scratch
+    # transformer = CogVideoXTransformer2DModel(
+    #     in_channels=16,
+    # )
+    
+    transformer = CogVideoXTransformer2DModel.from_pretrained(
+        "/data/wangxd/ckpt/cogvideox-2d-clip2image",
         subfolder="transformer",
-        # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=load_dtype,
         revision=args.revision,
         variant=args.variant,
-        in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
+        in_channels=16, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
     
     scheduler = CogVideoXDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler",)
@@ -920,7 +931,10 @@ def main(args):
     # We only train the additional adapter LoRA layers
     text_encoder.requires_grad_(False)
     vae.requires_grad_(False)
+    clip_model.requires_grad_(False)
+
     transformer.requires_grad_(True)
+    
 
     # For mixed precision training we cast all non-trainable weights (vae, text_encoder and transformer) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
@@ -954,6 +968,7 @@ def main(args):
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     transformer.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
+    clip_model.to(accelerator.device, dtype=weight_dtype)
     
     transformer.train()
 
@@ -991,7 +1006,7 @@ def main(args):
             else:
                 raise ValueError(f"Unexpected save model: {model.__class__}")
         
-        load_model = CogVideoXTransformer3DModel.from_pretrained(input_dir, subfolder="transformer")
+        load_model = CogVideoXTransformer2DModel.from_pretrained(input_dir, subfolder="transformer")
         transformer_.register_to_config(**load_model.config)
         
         transformer_.load_state_dict(load_model.state_dict())
@@ -1071,19 +1086,21 @@ def main(args):
         )
     
     # Dataset and DataLoader
-    train_dataset = NuscenesDatasetAllframesForCogvidx(
+    train_dataset = NuscenesDatasetCLIPForCogvidx(
         data_root=args.instance_data_root,
         height=args.height,
         width=args.width,
-        max_num_frames=args.max_num_frames,
+        max_num_frames=1,
         encode_video=encode_video,
         encode_prompt=encode_prompt
     )
 
+    # import pdb; pdb.set_trace()
 
     def collate_fn(examples):
         videos = []
         images = []
+        clip_videos = []
         for example in examples:
             latent_dist, image_latent_dist = example["instance_video"]
 
@@ -1107,18 +1124,25 @@ def main(args):
 
             videos.append(video_latents)
             images.append(image_latents)
+            
+            clip_videos.append(example["clip_video"])
 
         videos = torch.cat(videos)
         images = torch.cat(images)
         videos = videos.to(memory_format=torch.contiguous_format).float()
         images = images.to(memory_format=torch.contiguous_format).float()
+        
+        clip_videos = torch.cat(clip_videos)
+        clip_videos = clip_videos.to(memory_format=torch.contiguous_format).float()
 
         prompts = [example["instance_prompt"].to(accelerator.device) for example in examples]
         prompts = torch.cat(prompts)
 
+
         return {
             "videos": (videos, images),
             "prompts": prompts,
+            "clip_video": clip_videos
         }
 
     train_dataloader = DataLoader(
@@ -1238,12 +1262,28 @@ def main(args):
 
             with accelerator.accumulate(models_to_accumulate):
                 video_latents, image_latents = batch["videos"]
-                prompt_embeds = batch["prompts"]
+                # prompt_embeds = batch["prompts"]
 
                 video_latents = video_latents.to(dtype=weight_dtype)  # [B, F, C, H, W]
                 image_latents = image_latents.to(dtype=weight_dtype)  # [B, F, C, H, W], copy and repeat
 
                 batch_size, num_frames, num_channels, height, width = video_latents.shape
+                
+                # import pdb; pdb.set_trace()
+
+                # first clip features
+                # batch["clip_video"]: [bsz, 3, 224, 224]
+                # import pdb; pdb.set_trace()
+                vision_output = clip_model.vision_model(
+                    batch["clip_video"].to(video_latents.device, dtype=weight_dtype))
+                
+                # ["pooler_output", "last_hidden_state"], 1, 257
+                image_embedding_style = "last_hidden_state"
+
+                clip_embedding = clip_model.visual_projection(vision_output[image_embedding_style]) # b 1 1280
+                clip_embedding = clip_embedding.view(batch_size, -1, clip_embedding.shape[-1])
+
+                prompt_embeds = clip_embedding
 
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
@@ -1257,7 +1297,7 @@ def main(args):
                 # Add noise to the model input according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_video_latents = scheduler.add_noise(video_latents, noise, timesteps)
-                noisy_model_input = torch.cat([noisy_video_latents, image_latents], dim=2)
+                noisy_model_input = noisy_video_latents
 
                 # Prepare rotary embeds
                 image_rotary_emb = (
@@ -1282,6 +1322,9 @@ def main(args):
                     image_rotary_emb=image_rotary_emb,
                     return_dict=False,
                 )[0]
+                
+                # import pdb; pdb.set_trace()
+                
                 model_pred = scheduler.get_velocity(model_output, noisy_video_latents, timesteps)
 
                 alphas_cumprod = scheduler.alphas_cumprod[timesteps]
@@ -1415,14 +1458,7 @@ def main(args):
         free_memory()
 
         # check saved model
-        transformer_ = CogVideoXTransformer3DModel.from_pretrained(
-            args.output_dir,
-            subfolder="transformer",
-            torch_dtype=load_dtype,
-            revision=args.revision,
-            variant=args.variant,
-            in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
-        )
+        transformer_ = CogVideoXTransformer2DModel()
         transformer_.to(accelerator.device, dtype=weight_dtype)
 
         # Final test inference

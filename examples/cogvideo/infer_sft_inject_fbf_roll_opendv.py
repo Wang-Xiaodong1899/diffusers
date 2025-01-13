@@ -6,9 +6,12 @@ import torch
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
     CogVideoXTransformer3DModel,
 )
+
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_image2video_inject_fbf import CogVideoXImageToVideoPipeline
+
+
 from diffusers.utils import load_image, export_to_video
 from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer
 
@@ -27,7 +30,7 @@ text_encoder = T5EncoderModel.from_pretrained(
 )
 
 transformer = CogVideoXTransformer3DModel.from_pretrained(
-        "/data/wangxd/ckpt/cogvideox-A2-clean-image-inject-1128-inherit1022/checkpoint-3000",
+        "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f20-fps5-fbf-fft-1216/checkpoint-1000/",
         subfolder="transformer",
         # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=torch.float16,
@@ -51,14 +54,19 @@ components = {
             "tokenizer": tokenizer,
         }
 
-pipe = CogVideoXImageToVideoPipeline(**components)
+pipe = CogVideoXImageToVideoPipeline(**components, inject=True)
 pipe.enable_model_cpu_offload()
 pipe.vae.enable_slicing()
 pipe.vae.enable_tiling()
 
 print('Pipeline loaded!')
 
-rollout = 3
+rollout = input("rollout: ")
+rollout = int(rollout)
+
+actions = ["turn left", "turn left sharply", "turn right", "turn right sharply"]
+
+global_prompt = "Cloudy. Daytime. The road is a two-lane street with a yellow dividing line, surrounded by sidewalks, buildings, and trees. There are utility poles and power lines running parallel to the road. A bus stop shelter, and various signs and banners attached to the fences along the sidewalk."
 
 while True:
     image_path = input("image_path: ")
@@ -73,10 +81,9 @@ while True:
             "use_dynamic_cfg": True,
             "height": 480,
             "width": 720,
-            "num_frames": 33
+            "num_frames": 20
         }
         frames = pipe(**pipeline_args).frames[0]
         total_frames.extend(frames if r==(rollout-1) else frames[:-1])
     name_prefix = validation_prompt.replace(" ", "_").strip()[:40]
-    
-    export_to_video(total_frames, f"{name_prefix}_cfg_{guidance_scale}_roll_{rollout}_1128_3k.mp4", fps=8)
+    export_to_video(total_frames, f"OpenDV_{name_prefix}_cfg_{guidance_scale}_inject_fbf_roll_{rollout}_fft_1000.mp4", fps=8)

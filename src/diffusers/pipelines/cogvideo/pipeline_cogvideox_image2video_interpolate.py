@@ -353,6 +353,7 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
         device: Optional[torch.device] = None,
         generator: Optional[torch.Generator] = None,
         latents: Optional[torch.Tensor] = None,
+        last_image = None,
     ):
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
@@ -370,27 +371,36 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
         )
 
         image = image.unsqueeze(2)  # [B, C, F, H, W]
+        last_image = last_image.unsqueeze(2)  # [B, C, F, H, W]
 
         if isinstance(generator, list):
             image_latents = [
                 retrieve_latents(self.vae.encode(image[i].unsqueeze(0)), generator[i]) for i in range(batch_size)
             ]
+            last_image_latents = [
+                retrieve_latents(self.vae.encode(last_image[i].unsqueeze(0)), generator[i]) for i in range(batch_size)
+            ]
         else:
             image_latents = [retrieve_latents(self.vae.encode(img.unsqueeze(0)), generator) for img in image]
+            last_image_latents = [retrieve_latents(self.vae.encode(img.unsqueeze(0)), generator) for img in last_image]
 
         image_latents = torch.cat(image_latents, dim=0).to(dtype).permute(0, 2, 1, 3, 4)  # [B, F, C, H, W]
         image_latents = self.vae_scaling_factor_image * image_latents
+        
+        last_image_latents = torch.cat(last_image_latents, dim=0).to(dtype).permute(0, 2, 1, 3, 4)  # [B, F, C, H, W]
+        last_image_latents = self.vae_scaling_factor_image * last_image_latents
 
+        # given 2 frames
         padding_shape = (
             batch_size,
-            num_frames - 1,
+            num_frames - 2,
             num_channels_latents,
             height // self.vae_scale_factor_spatial,
             width // self.vae_scale_factor_spatial,
         )
         # if not self.inject:
         latent_padding = torch.zeros(padding_shape, device=device, dtype=dtype)
-        image_latents = torch.cat([image_latents, latent_padding], dim=1)
+        image_latents = torch.cat([image_latents, latent_padding, last_image_latents], dim=1)
 
         if latents is None:
             latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
@@ -563,6 +573,7 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
     def __call__(
         self,
         image: PipelineImageInput,
+        last_image = None,
         prompt: Optional[Union[str, List[str]]] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         height: int = 480,
@@ -732,6 +743,12 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
         image = self.video_processor.preprocess(image, height=height, width=width).to(
             device, dtype=prompt_embeds.dtype
         )
+        
+        last_image = self.video_processor.preprocess(last_image, height=height, width=width).to(
+            device, dtype=prompt_embeds.dtype
+        )
+        
+        # print(last_image.shape)
 
         latent_channels = self.transformer.config.in_channels // 2
         latents, image_latents = self.prepare_latents(
@@ -745,8 +762,10 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
             device,
             generator,
             latents,
+            last_image,
         )
         image_latent = image_latents[:, :1,]
+        last_image_latent = image_latents[:, -1:,]
         # [1, 13, 16, 60, 90], [1, 1, 16, 60, 90]
         # import pdb; pdb.set_trace()
 
@@ -766,6 +785,7 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
         # prepare image_latent
         if do_classifier_free_guidance:
             image_latent = torch.cat([image_latent] * 2)
+            last_image_latent = torch.cat([last_image_latent] * 2)
             # [2, 1, 16, 60, 90]
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -793,7 +813,8 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
                     image_rotary_emb=image_rotary_emb,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
-                    image_latent=image_latent if self.inject else None
+                    image_latent=image_latent if self.inject else None,
+                    last_image_latent=last_image_latent if self.inject else None,
                 )[0]
                 noise_pred = noise_pred.float()
 

@@ -26,8 +26,8 @@ mixed_precision: fp16
 dynamo_backend: 'no'
 mixed_precision: 'no'
 num_machines: 1
-num_processes: 6
-gpu_ids: 0,1,2,3,4,5
+num_processes: 2
+gpu_ids: 0,6
 rdzv_backend: static
 same_network: true
 use_cpu: false

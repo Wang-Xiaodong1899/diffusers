@@ -176,3 +176,14 @@ tags
 
 # wandb
 wandb
+
+CogVideoX-2b
+cogvideox-D4-clean-image-sft
+cogvideox-D4-clean-image-sft-1022
+
+*.jpg
+*.png
+*.json
+*.txt
+*.jsonl
+*.csv

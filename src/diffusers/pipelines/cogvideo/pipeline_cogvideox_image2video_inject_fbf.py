@@ -343,7 +343,7 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
 
     def prepare_latents(
         self,
-        image: torch.Tensor,
+        image,
         batch_size: int = 1,
         num_channels_latents: int = 16,
         num_frames: int = 13,
@@ -359,8 +359,6 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
-
-        num_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
         shape = (
             batch_size,
             num_frames,
@@ -369,21 +367,31 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
             width // self.vae_scale_factor_spatial,
         )
 
-        image = image.unsqueeze(2)  # [B, C, F, H, W]
-
-        if isinstance(generator, list):
-            image_latents = [
-                retrieve_latents(self.vae.encode(image[i].unsqueeze(0)), generator[i]) for i in range(batch_size)
-            ]
+        if isinstance(image, list):
+            # TODO encode multiple image latents frame by frame
+            # multiple images input, each image shape: [B, C, H, W]
+            image_latents = [retrieve_latents(self.vae.encode(img.unsqueeze(2)), generator) for img in image]
+            image_latents = torch.cat(image_latents, dim=2) # [(B C F H W)]
+            image_latents = image_latents.to(dtype).permute(0, 2, 1, 3, 4) # [B F C H W]
         else:
-            image_latents = [retrieve_latents(self.vae.encode(img.unsqueeze(0)), generator) for img in image]
+            image = image.unsqueeze(2)  # [B, C, F, H, W]
 
-        image_latents = torch.cat(image_latents, dim=0).to(dtype).permute(0, 2, 1, 3, 4)  # [B, F, C, H, W]
-        image_latents = self.vae_scaling_factor_image * image_latents
+            if isinstance(generator, list):
+                image_latents = [
+                    retrieve_latents(self.vae.encode(image[i].unsqueeze(0)), generator[i]) for i in range(batch_size)
+                ]
+            else:
+                image_latents = [retrieve_latents(self.vae.encode(img.unsqueeze(0)), generator) for img in image]
+
+            image_latents = torch.cat(image_latents, dim=0).to(dtype).permute(0, 2, 1, 3, 4)  # [B, F, C, H, W]
+            image_latents = self.vae_scaling_factor_image * image_latents
+        
+        
+        # import pdb; pdb.set_trace()
 
         padding_shape = (
             batch_size,
-            num_frames - 1,
+            num_frames - image_latents.shape[1],
             num_channels_latents,
             height // self.vae_scale_factor_spatial,
             width // self.vae_scale_factor_spatial,
@@ -405,8 +413,14 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         latents = latents.permute(0, 2, 1, 3, 4)  # [batch_size, num_channels, num_frames, height, width]
         latents = 1 / self.vae_scaling_factor_image * latents
-
-        frames = self.vae.decode(latents).sample
+        
+        frame_num = latents.shape[2]
+        frames = []
+        for idx in range(frame_num):
+            frames.append(self.vae.decode(latents[:, :, idx:idx+1]).sample)
+        
+        frames = torch.cat(frames, dim=2) # frame by frame
+        # frames = self.vae.decode(latents).sample # single-pass
         return frames
 
     # Copied from diffusers.pipelines.animatediff.pipeline_animatediff_video2video.AnimateDiffVideoToVideoPipeline.get_timesteps
@@ -729,9 +743,19 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents
-        image = self.video_processor.preprocess(image, height=height, width=width).to(
-            device, dtype=prompt_embeds.dtype
-        )
+        if isinstance(image, list):
+            total_images = []
+            for im in image:
+                im = self.video_processor.preprocess(im, height=height, width=width).to(
+                    device, dtype=prompt_embeds.dtype)
+                total_images.append(im)
+            image = total_images # a list
+        else:
+            image = self.video_processor.preprocess(image, height=height, width=width).to(
+                device, dtype=prompt_embeds.dtype
+            )
+        
+            
 
         latent_channels = self.transformer.config.in_channels // 2
         latents, image_latents = self.prepare_latents(

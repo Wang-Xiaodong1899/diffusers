@@ -6,9 +6,12 @@ import torch
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
     CogVideoXTransformer3DModel,
 )
+
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_image2video_inject_fbf import CogVideoXImageToVideoPipeline
+
+
 from diffusers.utils import load_image, export_to_video
 from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer
 
@@ -27,7 +30,8 @@ text_encoder = T5EncoderModel.from_pretrained(
 )
 
 transformer = CogVideoXTransformer3DModel.from_pretrained(
-        "/data/wangxd/ckpt/cogvideox-A2-clean-image-inject-1128-inherit1022/checkpoint-3000",
+        # "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps1-0102-fbf-noaug-cond4/checkpoint-1000/",
+        "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps1-0108-fbf-noaug-cond8-inject8-fft/checkpoint-500",
         subfolder="transformer",
         # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=torch.float16,
@@ -51,32 +55,47 @@ components = {
             "tokenizer": tokenizer,
         }
 
-pipe = CogVideoXImageToVideoPipeline(**components)
+pipe = CogVideoXImageToVideoPipeline(**components, inject=True)
 pipe.enable_model_cpu_offload()
 pipe.vae.enable_slicing()
 pipe.vae.enable_tiling()
 
 print('Pipeline loaded!')
 
-rollout = 3
+rollout = input("rollout: ")
+rollout = int(rollout)
+
+given_images = input("Given Images: ")
+given_images = int(given_images)
+
+actions = ["turn left", "turn left sharply", "turn right", "turn right sharply"]
+
+global_prompt = "Cloudy. Daytime. The road is a two-lane street with a yellow dividing line, surrounded by sidewalks, buildings, and trees. There are utility poles and power lines running parallel to the road. A bus stop shelter, and various signs and banners attached to the fences along the sidewalk."
 
 while True:
-    image_path = input("image_path: ")
+    # image_path = input("image_path: ")
+    image_dir = input("image dir: ")
+    image_paths = list(os.listdir(image_dir))
+    image_paths = [a for a in image_paths if a.endswith(".png") or a.endswith(".jpg")]
+    image_paths.sort()
+    
+    images = [load_image(os.path.join(image_dir, im)) for im in image_paths]
+    images = images[:given_images]
+    
     validation_prompt = input("prompt: ")
     guidance_scale = input("cfg: ") # 6
     total_frames = []
     for r in range(rollout):
         pipeline_args = {
-            "image": load_image(image_path) if r==0 else total_frames[-1],
+            "image": images if r==0 else frames[-given_images:],
             "prompt": validation_prompt,
             "guidance_scale": int(guidance_scale),
             "use_dynamic_cfg": True,
             "height": 480,
             "width": 720,
-            "num_frames": 33
+            "num_frames": 13,
         }
         frames = pipe(**pipeline_args).frames[0]
-        total_frames.extend(frames if r==(rollout-1) else frames[:-1])
+        total_frames.extend(frames if r==(rollout-1) else frames[:-given_images])
     name_prefix = validation_prompt.replace(" ", "_").strip()[:40]
-    
-    export_to_video(total_frames, f"{name_prefix}_cfg_{guidance_scale}_roll_{rollout}_1128_3k.mp4", fps=8)
+    export_to_video(total_frames, os.path.join(image_dir, f"{name_prefix}_cfg_{guidance_scale}_inject_fbf_roll_{rollout}_multiple_inject{given_images}_500.mp4"), fps=8)

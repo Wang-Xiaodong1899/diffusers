@@ -36,6 +36,8 @@ from ...utils.torch_utils import randn_tensor
 from ...video_processor import VideoProcessor
 from .pipeline_output import CogVideoXPipelineOutput
 
+import numpy as np
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -58,6 +60,115 @@ EXAMPLE_DOC_STRING = """
         >>> export_to_video(video.frames[0], "output.mp4", fps=8)
         ```
 """
+
+# resizing utils
+# TODO: clean up later
+def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True):
+    h, w = input.shape[-2:]
+    factors = (h / size[0], w / size[1])
+
+    # First, we have to determine sigma
+    # Taken from skimage: https://github.com/scikit-image/scikit-image/blob/v0.19.2/skimage/transform/_warps.py#L171
+    sigmas = (
+        max((factors[0] - 1.0) / 2.0, 0.001),
+        max((factors[1] - 1.0) / 2.0, 0.001),
+    )
+
+    # Now kernel size. Good results are for 3 sigma, but that is kind of slow. Pillow uses 1 sigma
+    # https://github.com/python-pillow/Pillow/blob/master/src/libImaging/Resample.c#L206
+    # But they do it in the 2 passes, which gives better results. Let's try 2 sigmas for now
+    ks = int(max(2.0 * 2 * sigmas[0], 3)), int(max(2.0 * 2 * sigmas[1], 3))
+
+    # Make sure it is odd
+    if (ks[0] % 2) == 0:
+        ks = ks[0] + 1, ks[1]
+
+    if (ks[1] % 2) == 0:
+        ks = ks[0], ks[1] + 1
+
+    input = _gaussian_blur2d(input, ks, sigmas)
+
+    output = torch.nn.functional.interpolate(input, size=size, mode=interpolation, align_corners=align_corners)
+    return output
+
+
+def _compute_padding(kernel_size):
+    """Compute padding tuple."""
+    # 4 or 6 ints:  (padding_left, padding_right,padding_top,padding_bottom)
+    # https://pytorch.org/docs/stable/nn.html#torch.nn.functional.pad
+    if len(kernel_size) < 2:
+        raise AssertionError(kernel_size)
+    computed = [k - 1 for k in kernel_size]
+
+    # for even kernels we need to do asymmetric padding :(
+    out_padding = 2 * len(kernel_size) * [0]
+
+    for i in range(len(kernel_size)):
+        computed_tmp = computed[-(i + 1)]
+
+        pad_front = computed_tmp // 2
+        pad_rear = computed_tmp - pad_front
+
+        out_padding[2 * i + 0] = pad_front
+        out_padding[2 * i + 1] = pad_rear
+
+    return out_padding
+
+
+def _filter2d(input, kernel):
+    # prepare kernel
+    b, c, h, w = input.shape
+    tmp_kernel = kernel[:, None, ...].to(device=input.device, dtype=input.dtype)
+
+    tmp_kernel = tmp_kernel.expand(-1, c, -1, -1)
+
+    height, width = tmp_kernel.shape[-2:]
+
+    padding_shape: list[int] = _compute_padding([height, width])
+    input = torch.nn.functional.pad(input, padding_shape, mode="reflect")
+
+    # kernel and input tensor reshape to align element-wise or batch-wise params
+    tmp_kernel = tmp_kernel.reshape(-1, 1, height, width)
+    input = input.view(-1, tmp_kernel.size(0), input.size(-2), input.size(-1))
+
+    # convolve the tensor with the kernel.
+    output = torch.nn.functional.conv2d(input, tmp_kernel, groups=tmp_kernel.size(0), padding=0, stride=1)
+
+    out = output.view(b, c, h, w)
+    return out
+
+
+def _gaussian(window_size: int, sigma):
+    if isinstance(sigma, float):
+        sigma = torch.tensor([[sigma]])
+
+    batch_size = sigma.shape[0]
+
+    x = (torch.arange(window_size, device=sigma.device, dtype=sigma.dtype) - window_size // 2).expand(batch_size, -1)
+
+    if window_size % 2 == 0:
+        x = x + 0.5
+
+    gauss = torch.exp(-x.pow(2.0) / (2 * sigma.pow(2.0)))
+
+    return gauss / gauss.sum(-1, keepdim=True)
+
+
+def _gaussian_blur2d(input, kernel_size, sigma):
+    if isinstance(sigma, tuple):
+        sigma = torch.tensor([sigma], dtype=input.dtype)
+    else:
+        sigma = sigma.to(dtype=input.dtype)
+
+    ky, kx = int(kernel_size[0]), int(kernel_size[1])
+    bs = sigma.shape[0]
+    kernel_x = _gaussian(kx, sigma[:, 1].view(bs, 1))
+    kernel_y = _gaussian(ky, sigma[:, 0].view(bs, 1))
+    out_x = _filter2d(input, kernel_x[..., None, :])
+    out = _filter2d(out_x, kernel_y[..., None])
+
+    return out
+
 
 
 # Similar to diffusers.pipelines.hunyuandit.pipeline_hunyuandit.get_resize_crop_region_for_grid
@@ -192,10 +303,10 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
         vae: AutoencoderKLCogVideoX,
         transformer: CogVideoXTransformer3DModel,
         scheduler: Union[CogVideoXDDIMScheduler, CogVideoXDPMScheduler],
-        inject: bool=False,
+        feature_extractor,
+        clip_model,
     ):
         super().__init__()
-        self.inject = inject
 
         self.register_modules(
             tokenizer=tokenizer,
@@ -203,6 +314,8 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
             vae=vae,
             transformer=transformer,
             scheduler=scheduler,
+            feature_extractor=feature_extractor,
+            clip_model=clip_model
         )
         self.vae_scale_factor_spatial = (
             2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
@@ -341,6 +454,97 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
 
         return prompt_embeds, negative_prompt_embeds
 
+    @staticmethod
+    def numpy_to_pil(images: np.ndarray) -> List[PIL.Image.Image]:
+        """
+        Convert a numpy image or a batch of images to a PIL image.
+        """
+        if images.ndim == 3:
+            images = images[None, ...]
+        images = (images * 255).round().astype("uint8")
+        if images.shape[-1] == 1:
+            # special case for grayscale (single channel) images
+            pil_images = [PIL.Image.fromarray(image.squeeze(), mode="L") for image in images]
+        else:
+            pil_images = [PIL.Image.fromarray(image) for image in images]
+
+        return pil_images
+
+    @staticmethod
+    def pil_to_numpy(images: Union[List[PIL.Image.Image], PIL.Image.Image]) -> np.ndarray:
+        """
+        Convert a PIL image or a list of PIL images to NumPy arrays.
+        """
+        if not isinstance(images, list):
+            images = [images]
+        images = [np.array(image).astype(np.float32) / 255.0 for image in images]
+        images = np.stack(images, axis=0)
+
+        return images
+
+    @staticmethod
+    def numpy_to_pt(images: np.ndarray) -> torch.FloatTensor:
+        """
+        Convert a NumPy image to a PyTorch tensor.
+        """
+        if images.ndim == 3:
+            images = images[..., None]
+
+        images = torch.from_numpy(images.transpose(0, 3, 1, 2))
+        return images
+    
+    def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance, img_style="last_hidden_state"):
+        # dtype = next(self.image_encoder.parameters()).dtype
+        dtype = torch.float16
+
+        if not isinstance(image, torch.Tensor):
+            image = self.pil_to_numpy(image)
+            image = self.numpy_to_pt(image)
+
+            # We normalize the image before resizing to match with the original implementation.
+            # Then we unnormalize it after resizing.
+            image = image * 2.0 - 1.0
+            image = _resize_with_antialiasing(image, (224, 224)) # apply resize
+            image = (image + 1.0) / 2.0
+
+            # Normalize the image with for CLIP input
+            image = self.feature_extractor(
+                images=image,
+                do_normalize=True,
+                do_center_crop=False,
+                do_resize=False,
+                do_rescale=False,
+                return_tensors="pt",
+            ).pixel_values
+
+        image = image.to(device=device, dtype=dtype)
+        # image_embeddings = self.image_encoder(image).image_embeds
+        # image_embeddings = image_embeddings.unsqueeze(1)
+        self.clip_model.to(device)
+
+        vision_output = self.clip_model.vision_model(image)
+        # ["pooler_output", "last_hidden_state"]
+        image_embedding_style = img_style
+
+        clip_embedding = self.clip_model.visual_projection(vision_output[image_embedding_style]) # b 1 1024
+        image_embeddings = clip_embedding.unsqueeze(1) if clip_embedding.shape[1] == 1 else clip_embedding
+        print(f'image clip embedding {image_embeddings.shape}')
+
+        # duplicate image embeddings for each generation per prompt, using mps friendly method
+        bs_embed, seq_len, _ = image_embeddings.shape
+        image_embeddings = image_embeddings.repeat(1, num_videos_per_prompt, 1)
+        image_embeddings = image_embeddings.view(bs_embed * num_videos_per_prompt, seq_len, -1)
+
+        if do_classifier_free_guidance:
+            negative_image_embeddings = torch.zeros_like(image_embeddings)
+
+            # For classifier free guidance, we need to do two forward passes.
+            # Here we concatenate the unconditional and text embeddings into a single batch
+            # to avoid doing two forward passes
+            image_embeddings = torch.cat([negative_image_embeddings, image_embeddings])
+
+        return image_embeddings
+
     def prepare_latents(
         self,
         image: torch.Tensor,
@@ -388,9 +592,8 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
             height // self.vae_scale_factor_spatial,
             width // self.vae_scale_factor_spatial,
         )
-        # if not self.inject:
         latent_padding = torch.zeros(padding_shape, device=device, dtype=dtype)
-        image_latents = torch.cat([image_latents, latent_padding], dim=1)
+        # image_latents = torch.cat([image_latents, latent_padding], dim=1)
 
         if latents is None:
             latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
@@ -721,8 +924,20 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
             max_sequence_length=max_sequence_length,
             device=device,
         )
+        
+        # encode image
+        if isinstance(image, list):
+            clip_image = image[0]
+        else:
+            clip_image = image
+        image_embeddings = self._encode_image(clip_image, device, num_videos_per_prompt, do_classifier_free_guidance, img_style='last_hidden_state')
+        
+        
         if do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        
+        # overwrite
+        prompt_embeds = image_embeddings
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
@@ -732,8 +947,9 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
         image = self.video_processor.preprocess(image, height=height, width=width).to(
             device, dtype=prompt_embeds.dtype
         )
+        
 
-        latent_channels = self.transformer.config.in_channels // 2
+        latent_channels = self.transformer.config.in_channels
         latents, image_latents = self.prepare_latents(
             image,
             batch_size * num_videos_per_prompt,
@@ -746,9 +962,6 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
             generator,
             latents,
         )
-        image_latent = image_latents[:, :1,]
-        # [1, 13, 16, 60, 90], [1, 1, 16, 60, 90]
-        # import pdb; pdb.set_trace()
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -762,11 +975,6 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
 
         # 8. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        
-        # prepare image_latent
-        if do_classifier_free_guidance:
-            image_latent = torch.cat([image_latent] * 2)
-            # [2, 1, 16, 60, 90]
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             # for DPM-solver++
@@ -777,10 +985,9 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
 
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-                # [2, 13, 16, 60, 90]
-                # if not self.inject:
+
                 latent_image_input = torch.cat([image_latents] * 2) if do_classifier_free_guidance else image_latents
-                latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=2)
+                # latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=2)
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
@@ -793,7 +1000,6 @@ class CogVideoXImageToVideoPipeline(DiffusionPipeline, CogVideoXLoraLoaderMixin)
                     image_rotary_emb=image_rotary_emb,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
-                    image_latent=image_latent if self.inject else None
                 )[0]
                 noise_pred = noise_pred.float()
 

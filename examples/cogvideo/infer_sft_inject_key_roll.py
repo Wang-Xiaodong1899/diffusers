@@ -6,9 +6,12 @@ import torch
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
     CogVideoXTransformer3DModel,
 )
+
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_image2video_inject import CogVideoXImageToVideoPipeline
+
+
 from diffusers.utils import load_image, export_to_video
 from transformers import AutoTokenizer, T5EncoderModel, T5Tokenizer
 
@@ -27,7 +30,7 @@ text_encoder = T5EncoderModel.from_pretrained(
 )
 
 transformer = CogVideoXTransformer3DModel.from_pretrained(
-        "/data/wangxd/ckpt/cogvideox-A2-clean-image-inject-1128-inherit1022/checkpoint-3000",
+        "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f9-1130-inherit1022/checkpoint-2000",
         subfolder="transformer",
         # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=torch.float16,
@@ -51,7 +54,7 @@ components = {
             "tokenizer": tokenizer,
         }
 
-pipe = CogVideoXImageToVideoPipeline(**components)
+pipe = CogVideoXImageToVideoPipeline(**components, inject=True)
 pipe.enable_model_cpu_offload()
 pipe.vae.enable_slicing()
 pipe.vae.enable_tiling()
@@ -73,10 +76,9 @@ while True:
             "use_dynamic_cfg": True,
             "height": 480,
             "width": 720,
-            "num_frames": 33
+            "num_frames": 9
         }
         frames = pipe(**pipeline_args).frames[0]
         total_frames.extend(frames if r==(rollout-1) else frames[:-1])
     name_prefix = validation_prompt.replace(" ", "_").strip()[:40]
-    
-    export_to_video(total_frames, f"{name_prefix}_cfg_{guidance_scale}_roll_{rollout}_1128_3k.mp4", fps=8)
+    export_to_video(total_frames, f"{name_prefix}_cfg_{guidance_scale}_inject_key_roll_{rollout}_2k.mp4", fps=6)

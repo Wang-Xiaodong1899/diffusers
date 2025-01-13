@@ -366,9 +366,23 @@ class CogVideoXPatchEmbed(nn.Module):
         self.use_positional_embeddings = use_positional_embeddings
         self.use_learned_positional_embeddings = use_learned_positional_embeddings
 
+        # only for image latent
+        # self.proj = nn.Conv2d(
+        #     16, embed_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=bias
+        # )
         self.proj = nn.Conv2d(
             in_channels, embed_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=bias
         )
+        
+        self.origin_proj = nn.Conv2d(
+            16, embed_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=bias
+        )
+        
+        # for whole input
+        # self.new_proj = nn.Conv2d(
+        #     in_channels, embed_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=bias
+        # )
+        
         self.text_proj = nn.Linear(text_embed_dim, embed_dim)
 
         if use_positional_embeddings or use_learned_positional_embeddings:

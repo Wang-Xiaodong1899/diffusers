@@ -44,9 +44,11 @@ import diffusers
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
     CogVideoXTransformer3DModel,
 )
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_image2video_inject_fbf import CogVideoXImageToVideoPipeline
+
+
 from diffusers.models.embeddings import get_3d_rotary_pos_embed
 from diffusers.optimization import get_scheduler
 from diffusers.pipelines.cogvideo.pipeline_cogvideox import get_resize_crop_region_for_grid
@@ -66,7 +68,7 @@ import torchvision.transforms as TT
 import numpy as np
 from diffusers.image_processor import VaeImageProcessor
 
-from nuscenes_dataset_for_cogvidx import NuscenesDatasetAllframesForCogvidx
+from nuscenes_dataset_for_cogvidx import NuscenesDatasetFPS1OneByOneForCogvidx
 
 
 if is_wandb_available():
@@ -301,7 +303,7 @@ def get_args():
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
-        default=None,
+        default="latest",
         help=(
             "Whether training should be resumed from a previous checkpoint. Use a path saved by"
             ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
@@ -449,6 +451,17 @@ def get_args():
         ),
     )
     parser.add_argument("--nccl_timeout", type=int, default=600, help="NCCL backend timeout in seconds.")
+    parser.add_argument(
+        "--given_frames",
+        type=int,
+        default=1,
+        help="Image condition number.",
+    )
+    parser.add_argument(
+        "--inject_multi",
+        action="store_true",
+        help="inject multiple frames into DiT"
+    )
 
     return parser.parse_args()
 
@@ -901,7 +914,8 @@ def main(args):
     # CogVideoX-5b and CogVideoX-5b-I2V weights are stored in bfloat16
     load_dtype = torch.bfloat16 if "5b" in args.pretrained_model_name_or_path.lower() else torch.float16
     transformer = CogVideoXTransformer3DModel.from_pretrained(
-        args.pretrained_model_name_or_path,
+        # args.pretrained_model_name_or_path,
+        "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps10-1222-fbf-noaug/checkpoint-5000",
         subfolder="transformer",
         # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=load_dtype,
@@ -909,6 +923,16 @@ def main(args):
         variant=args.variant,
         in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
+    
+    # from safetensors import safe_open
+    # tensors = {}
+    # with safe_open(os.path.join("/home/user/wangxd/diffusers/CogVideoX-2b/transformer", "diffusion_pytorch_model.safetensors"), framework="pt", device='cpu') as f:
+    #     for k in f.keys():
+    #         if "patch_embed.proj" in k:
+    #             nk = k.replace("proj", "origin_proj")
+    #             tensors[nk] = f.get_tensor(k)
+    #             print(k)
+    # transformer.load_state_dict(tensors, strict=False)
     
     scheduler = CogVideoXDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler",)
 
@@ -920,6 +944,7 @@ def main(args):
     # We only train the additional adapter LoRA layers
     text_encoder.requires_grad_(False)
     vae.requires_grad_(False)
+
     transformer.requires_grad_(True)
 
     # For mixed precision training we cast all non-trainable weights (vae, text_encoder and transformer) to half-precision
@@ -1025,6 +1050,15 @@ def main(args):
     
     # trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     trainable_parameters = list(transformer.parameters())
+    
+    # # # NOTE XXX overwrite for DEBUG
+    # optimize_param = []
+    # for name, param in transformer.named_parameters():
+    #     param.requires_grad = False
+    #     if "proj" in name and "text" not in name:
+    #         param.requires_grad = True
+    #         optimize_param.append(param)
+    # trainable_parameters = optimize_param
 
     # import pdb; pdb.set_trace()
 
@@ -1048,15 +1082,37 @@ def main(args):
         video = video.permute(0, 2, 1, 3, 4)  # [B, C, F, H, W]
         image = video[:, :, :1].clone()
 
-        latent_dist = vae.encode(video).latent_dist
+        # with torch.no_grad():
+        frame_num = video.shape[2] # F
+        frames_latent = []
+        for idx in range(frame_num):
+            frames_latent.append(vae.encode(video[:, :, idx:idx+1]).latent_dist.sample().cpu())
+        
+        latent_dist = torch.cat(frames_latent, dim=2) # frame by frame
+        # print(latent_dist.requires_grad)
+        # latent_dist.requires_grad_(False)
+        # latent_dist = vae.encode(video).latent_dist # single-pass
+        del frames_latent
+        
+        if args.given_frames == 1:
+            image_noise_sigma = torch.normal(mean=-3.0, std=0.5, size=(1,), device=image.device)
+            image_noise_sigma = torch.exp(image_noise_sigma).to(dtype=image.dtype)
+            noisy_image = torch.randn_like(image) * image_noise_sigma[:, None, None, None, None] + image
+            if args.denoised_image:
+                noisy_image = image
+            image_latent_dist = vae.encode(noisy_image).latent_dist.sample().cpu()
+        else:
+            # more conditional frames
+            cond_frames_latent = []
+            for idx in range(args.given_frames):
+                cond_frames_latent.append(vae.encode(video[:, :, idx:idx+1]).latent_dist.sample().cpu())
+            
+            image_latent_dist = torch.cat(cond_frames_latent, dim=2) # frame by frame
+            
+            del cond_frames_latent
 
-        image_noise_sigma = torch.normal(mean=-3.0, std=0.5, size=(1,), device=image.device)
-        image_noise_sigma = torch.exp(image_noise_sigma).to(dtype=image.dtype)
-        noisy_image = torch.randn_like(image) * image_noise_sigma[:, None, None, None, None] + image
-        if args.denoised_image:
-            noisy_image = image
-        image_latent_dist = vae.encode(noisy_image).latent_dist
-
+        latent_dist = latent_dist.detach()
+        
         return latent_dist, image_latent_dist
     
     def encode_prompt(prompt):
@@ -1071,7 +1127,7 @@ def main(args):
         )
     
     # Dataset and DataLoader
-    train_dataset = NuscenesDatasetAllframesForCogvidx(
+    train_dataset = NuscenesDatasetFPS1OneByOneForCogvidx(
         data_root=args.instance_data_root,
         height=args.height,
         width=args.width,
@@ -1098,7 +1154,7 @@ def main(args):
             video_latents = video_latents.permute(0, 2, 1, 3, 4)
             image_latents = image_latents.permute(0, 2, 1, 3, 4)
 
-            padding_shape = (video_latents.shape[0], video_latents.shape[1] - 1, *video_latents.shape[2:])
+            padding_shape = (video_latents.shape[0], video_latents.shape[1] - image_latents.shape[1], *video_latents.shape[2:])
             latent_padding = image_latents.new_zeros(padding_shape)
             image_latents = torch.cat([image_latents, latent_padding], dim=1) # copy and repeat
 
@@ -1239,6 +1295,8 @@ def main(args):
             with accelerator.accumulate(models_to_accumulate):
                 video_latents, image_latents = batch["videos"]
                 prompt_embeds = batch["prompts"]
+                
+                # import pdb; pdb.set_trace()
 
                 video_latents = video_latents.to(dtype=weight_dtype)  # [B, F, C, H, W]
                 image_latents = image_latents.to(dtype=weight_dtype)  # [B, F, C, H, W], copy and repeat
@@ -1273,7 +1331,12 @@ def main(args):
                     if model_config.use_rotary_positional_embeddings
                     else None
                 )
-
+                
+                image_latent = image_latents[:, :1] # take the first frame
+                
+                if args.inject_multi:
+                    image_latent = image_latents # [B,F, C, H, W]
+                    # image_latent = image_latents.flatten(0, 1) # [B*F, C, H, W]
                 # Predict the noise residual
                 model_output = transformer(
                     hidden_states=noisy_model_input,
@@ -1281,6 +1344,7 @@ def main(args):
                     timestep=timesteps,
                     image_rotary_emb=image_rotary_emb,
                     return_dict=False,
+                    image_latent = image_latent,
                 )[0]
                 model_pred = scheduler.get_velocity(model_output, noisy_video_latents, timesteps)
 
@@ -1293,10 +1357,13 @@ def main(args):
 
                 loss = torch.mean((weights * (model_pred - target) ** 2).reshape(batch_size, -1), dim=1)
                 
+                # frame loss
+                # loss = torch.mean((weights * (model_pred[:, args.given_frames:] - target[:, args.given_frames:]) ** 2))
+                
                 # visu conditional loss
-                loss_s = torch.mean((weights * (model_pred[:, 0] - target[:, 0]) ** 2)).detach()
-                loss_m = torch.mean((weights * (model_pred[:, num_frames//2] - target[:, num_frames//2]) ** 2)).detach()
-                loss_e = torch.mean((weights * (model_pred[:, -1] - target[:, -1]) ** 2)).detach()
+                # loss_s = torch.mean((weights * (model_pred[:, 0] - target[:, 0]) ** 2)).detach()
+                # loss_m = torch.mean((weights * (model_pred[:, num_frames//2] - target[:, num_frames//2]) ** 2)).detach()
+                # loss_e = torch.mean((weights * (model_pred[:, -1] - target[:, -1]) ** 2)).detach()
                 
                 loss = loss.mean()
                 accelerator.backward(loss)
@@ -1347,9 +1414,6 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"loss": loss.detach().item(),
-                    "loss_s": loss_s.detach().item(),
-                    "loss_m": loss_m.detach().item(),
-                    "loss_e": loss_e.detach().item(),
                     "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
@@ -1369,32 +1433,31 @@ def main(args):
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                     vae = vae,
-                    text_encoder=text_encoder
+                    text_encoder=text_encoder,
+                    inject=True
                 )
 
                 validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
                 validation_images = args.validation_images.split(args.validation_prompt_separator)
 
-                # for validation_image, validation_prompt in zip(validation_images, validation_prompts):
-                for validation_image in validation_images:
-                    for validation_prompt in validation_prompts:
-                        pipeline_args = {
-                            "image": load_image(validation_image),
-                            "prompt": validation_prompt,
-                            "guidance_scale": args.guidance_scale,
-                            "use_dynamic_cfg": args.use_dynamic_cfg,
-                            "height": args.height,
-                            "width": args.width,
-                            "num_frames": args.max_num_frames
-                        }
+                for validation_prompt in validation_prompts:
+                    pipeline_args = {
+                        "image": [load_image(validation_image) for validation_image in validation_images],
+                        "prompt": validation_prompt,
+                        "guidance_scale": args.guidance_scale,
+                        "use_dynamic_cfg": args.use_dynamic_cfg,
+                        "height": args.height,
+                        "width": args.width,
+                        "num_frames": args.max_num_frames
+                    }
 
-                        validation_outputs = log_validation(
-                            pipe=pipe,
-                            args=args,
-                            accelerator=accelerator,
-                            pipeline_args=pipeline_args,
-                            epoch=epoch,
-                        )
+                    validation_outputs = log_validation(
+                        pipe=pipe,
+                        args=args,
+                        accelerator=accelerator,
+                        pipeline_args=pipeline_args,
+                        epoch=epoch,
+                    )
 
     # Save the lora layers
     accelerator.wait_for_everyone()

@@ -122,6 +122,7 @@ class CogVideoXBlock(nn.Module):
         temb: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         image_latent: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        last_image_latent: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         text_seq_length = encoder_hidden_states.size(1)
 
@@ -266,6 +267,7 @@ class CogVideoXBlockInject(nn.Module):
         temb: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         image_latent: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        last_image_latent: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         text_seq_length = encoder_hidden_states.size(1)
 
@@ -281,20 +283,31 @@ class CogVideoXBlockInject(nn.Module):
             if batch_context_frames == batch_size:  # single-frame context: (b c h w)
                 # default is single-frame
                 image_latent = image_latent.squeeze(1)
-                # import pdb; pdb.set_trace()
-                image_gamma = self.image_gamma(image_latent) # (b c h w)
-                image_beta = self.image_beta(image_latent) # (b c h w)
-                image_gamma = rearrange(image_gamma, 'b c h w -> b (h w) c')
-                image_beta = rearrange(image_beta, 'b c h w -> b (h w) c')
-                token_length = norm_hidden_states.shape[1]
-                image_gamma = repeat(image_gamma, 'b x c -> b (x n) c', n=token_length//image_gamma.shape[1])
-                image_beta = repeat(image_beta, 'b x c -> b (x n) c', n=token_length//image_beta.shape[1])
-            else:
-                # import pdb; pdb.set_trace()
-                image_gamma = self.image_gamma(image_latent) # (b*f c h w)
-                image_beta = self.image_beta(image_latent) # (b*f c h w)
-                image_gamma = rearrange(image_gamma, '(b f) c h w -> b (h w f) c', f=batch_context_frames//batch_size)
-                image_beta = rearrange(image_beta, '(b f) c h w -> b (h w f) c', f=batch_context_frames//batch_size)
+                last_image_latent = last_image_latent.squeeze(1)
+            # import pdb; pdb.set_trace()
+            image_gamma = self.image_gamma(image_latent) # (b c h w)
+            image_beta = self.image_beta(image_latent) # (b c h w)
+            image_gamma = rearrange(image_gamma, 'b c h w -> b (h w) c')
+            image_beta = rearrange(image_beta, 'b c h w -> b (h w) c')
+            
+            last_image_gamma = self.image_gamma(last_image_latent) # (b c h w)
+            last_image_beta = self.image_beta(last_image_latent) # (b c h w)
+            last_image_gamma = rearrange(last_image_gamma, 'b c h w -> b (h w) c')
+            last_image_beta = rearrange(last_image_beta, 'b c h w -> b (h w) c')
+            
+            token_length = norm_hidden_states.shape[1]
+            pad_frame = token_length//image_gamma.shape[1] - 2
+            pad_shape = (image_gamma.shape[0], image_gamma.shape[1]*pad_frame, image_gamma.shape[2])
+            gamma_padding = image_gamma.new_zeros(pad_shape) # (b, , c)
+            image_gamma = torch.cat([image_gamma, gamma_padding, last_image_gamma], dim=1) # (b (x n) c)
+            
+            pad_frame = token_length//image_beta.shape[1] - 2
+            pad_shape = (image_beta.shape[0], image_beta.shape[1]*pad_frame, image_beta.shape[2])
+            beta_padding = image_beta.new_zeros(pad_shape) # (b, , c)
+            image_beta = torch.cat([image_beta, beta_padding, last_image_beta], dim=1) # (b (x n) c)
+            
+            # image_gamma = repeat(image_gamma, 'b x c -> b (x n) c', n=token_length//image_gamma.shape[1])
+            # image_beta = repeat(image_beta, 'b x c -> b (x n) c', n=token_length//image_beta.shape[1])
             norm_hidden_states = norm_hidden_states + self.image_norm(norm_hidden_states)* image_gamma + image_beta
 
         # attention
@@ -595,6 +608,7 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
         image_latent: Optional[torch.Tensor] = None,
+        last_image_latent: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -634,18 +648,20 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         if image_latent is not None:
             # import pdb; pdb.set_trace()
             # XXX prepare image_latent
-            image_latent_frame = image_latent.shape[1]
             image_latent = image_latent.reshape(-1, *image_latent.shape[2:])
             image_latent = self.patch_embed.origin_proj(image_latent) # NOTE in_channels, origin_proj
-            image_latent = image_latent.view(batch_size, image_latent_frame, *image_latent.shape[1:]) # [b, frame, dim, h, w]
-
-            # multiple frame
-            if image_latent_frame > 1:
-                image_latent = image_latent.flatten(0, 1)
-
+            image_latent = image_latent.view(batch_size, 1, *image_latent.shape[1:])
             # image_latent = image_latent.flatten(3).transpose(2, 3)  # [batch, num_frames, height x width, channels]
             
             # print(f'image latent shape: {image_latent.shape}')
+        
+        if last_image_latent is not None:
+            # import pdb; pdb.set_trace()
+            # XXX prepare image_latent
+            last_image_latent = last_image_latent.reshape(-1, *last_image_latent.shape[2:])
+            last_image_latent = self.patch_embed.origin_proj(last_image_latent) # NOTE in_channels, origin_proj
+            last_image_latent = last_image_latent.view(batch_size, 1, *last_image_latent.shape[1:])
+            # print(f"last image latent: {last_image_latent.shape}")
         
         # 3. Transformer blocks
         for i, block in enumerate(self.transformer_blocks):
@@ -665,6 +681,7 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                     emb,
                     image_rotary_emb,
                     image_latent,
+                    last_image_latent,
                     **ckpt_kwargs,
                 )
             else:
@@ -673,7 +690,8 @@ class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                     encoder_hidden_states=encoder_hidden_states,
                     temb=emb,
                     image_rotary_emb=image_rotary_emb,
-                    image_latent=image_latent
+                    image_latent=image_latent,
+                    last_image_latent=last_image_latent,
                 )
 
         if not self.config.use_rotary_positional_embeddings:

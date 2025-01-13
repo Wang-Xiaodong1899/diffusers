@@ -44,9 +44,12 @@ import diffusers
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
-    CogVideoXTransformer3DModel,
+    # CogVideoXTransformer3DModel,
 )
+from diffusers.models.transformers.cogvideox_transformer_3d_causal import CogVideoXTransformer3DModel
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_image2video_inject import CogVideoXImageToVideoPipeline
+
+
 from diffusers.models.embeddings import get_3d_rotary_pos_embed
 from diffusers.optimization import get_scheduler
 from diffusers.pipelines.cogvideo.pipeline_cogvideox import get_resize_crop_region_for_grid
@@ -301,7 +304,7 @@ def get_args():
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
-        default=None,
+        default="latest",
         help=(
             "Whether training should be resumed from a previous checkpoint. Use a path saved by"
             ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
@@ -901,7 +904,7 @@ def main(args):
     # CogVideoX-5b and CogVideoX-5b-I2V weights are stored in bfloat16
     load_dtype = torch.bfloat16 if "5b" in args.pretrained_model_name_or_path.lower() else torch.float16
     transformer = CogVideoXTransformer3DModel.from_pretrained(
-        args.pretrained_model_name_or_path,
+        "/home/user/wangxd/diffusers/cogvideox-D4-clean-image-sft-1022",
         subfolder="transformer",
         # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=load_dtype,
@@ -909,6 +912,17 @@ def main(args):
         variant=args.variant,
         in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
+    
+    from safetensors import safe_open
+    tensors = {}
+    with safe_open(os.path.join("/home/user/wangxd/diffusers/CogVideoX-2b/transformer", "diffusion_pytorch_model.safetensors"), framework="pt", device='cpu') as f:
+        for k in f.keys():
+            if "patch_embed.proj" in k:
+                nk = k.replace("proj", "origin_proj")
+                tensors[nk] = f.get_tensor(k)
+                print(k)
+    
+    transformer.load_state_dict(tensors, strict=False)
     
     scheduler = CogVideoXDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler",)
 
@@ -1025,6 +1039,15 @@ def main(args):
     
     # trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     trainable_parameters = list(transformer.parameters())
+    
+    # # NOTE XXX overwrite for DEBUG
+    # optimize_param = []
+    # for name, param in transformer.named_parameters():
+    #     param.requires_grad = False
+    #     if "proj" in name and "text" not in name:
+    #         param.requires_grad = True
+    #         optimize_param.append(param)
+    # trainable_parameters = optimize_param
 
     # import pdb; pdb.set_trace()
 
@@ -1273,7 +1296,9 @@ def main(args):
                     if model_config.use_rotary_positional_embeddings
                     else None
                 )
-
+                
+                
+                image_latent = image_latents[:, :1] # take the first frame
                 # Predict the noise residual
                 model_output = transformer(
                     hidden_states=noisy_model_input,
@@ -1281,6 +1306,7 @@ def main(args):
                     timestep=timesteps,
                     image_rotary_emb=image_rotary_emb,
                     return_dict=False,
+                    image_latent = image_latent,
                 )[0]
                 model_pred = scheduler.get_velocity(model_output, noisy_video_latents, timesteps)
 
@@ -1369,7 +1395,8 @@ def main(args):
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                     vae = vae,
-                    text_encoder=text_encoder
+                    text_encoder=text_encoder,
+                    inject=True
                 )
 
                 validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)

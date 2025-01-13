@@ -27,7 +27,7 @@ text_encoder = T5EncoderModel.from_pretrained(
 )
 
 transformer = CogVideoXTransformer3DModel.from_pretrained(
-        "/data/wangxd/ckpt/cogvideox-A2-clean-image-inject-1128-inherit1022/checkpoint-3000",
+        "/home/user/wangxd/diffusers/cogvideox-D4-clean-image-sft-1022",
         subfolder="transformer",
         # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=torch.float16,
@@ -58,7 +58,7 @@ pipe.vae.enable_tiling()
 
 print('Pipeline loaded!')
 
-rollout = 3
+rollout = 4
 
 while True:
     image_path = input("image_path: ")
@@ -67,7 +67,7 @@ while True:
     total_frames = []
     for r in range(rollout):
         pipeline_args = {
-            "image": load_image(image_path) if r==0 else total_frames[-1],
+            "image": load_image(image_path) if r==0 else frames[-1],
             "prompt": validation_prompt,
             "guidance_scale": int(guidance_scale),
             "use_dynamic_cfg": True,
@@ -78,5 +78,5 @@ while True:
         frames = pipe(**pipeline_args).frames[0]
         total_frames.extend(frames if r==(rollout-1) else frames[:-1])
     name_prefix = validation_prompt.replace(" ", "_").strip()[:40]
-    
-    export_to_video(total_frames, f"{name_prefix}_cfg_{guidance_scale}_roll_{rollout}_1128_3k.mp4", fps=8)
+    dir = os.path.dirname(image_path)
+    export_to_video(total_frames, os.path.join(dir, f"{name_prefix}_cfg_{guidance_scale}_roll_{rollout}_1022_baseline.mp4"), fps=8)

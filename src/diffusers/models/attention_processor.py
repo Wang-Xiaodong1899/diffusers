@@ -1948,6 +1948,275 @@ class CogVideoXAttnProcessor2_0:
         )
         return hidden_states, encoder_hidden_states
 
+def create_temporal_attention_mask(batch_size, frames=13, height=30, width=45):
+    """
+    Args:
+    batch, frames, height, width
+    
+    returns:
+    attention_mask: (batch, sequence_length, sequen_length)
+    """
+    num_tokens_per_frame = height * width
+    sequence_length = frames * num_tokens_per_frame
+
+    # Step 1: frame level (frames, frames)
+    frame_causal_mask = torch.triu(torch.ones(frames, frames), diagonal=1)
+    frame_causal_mask = frame_causal_mask.masked_fill(frame_causal_mask == 1, float('-inf')).masked_fill(frame_causal_mask == 0, 0)
+
+    # Step 2: token level (sequence_length, sequence_length)
+    frame_causal_mask = frame_causal_mask.repeat_interleave(num_tokens_per_frame, dim=0)
+    frame_causal_mask = frame_causal_mask.repeat_interleave(num_tokens_per_frame, dim=1)
+
+    # Step 3: batch level (batch_size, sequence_length, sequence_length)
+    attention_mask = frame_causal_mask.unsqueeze(0).repeat(batch_size, 1, 1)
+    
+    return attention_mask
+
+
+def create_temporal_attention_mask_decay(batch_size, frames=13, height=30, width=45, kernel_size=13, decay_factor=0.8):
+    """
+    Args:
+    batch_size: Number of batches
+    frames: Number of frames
+    height: Height of each frame
+    width: Width of each frame
+    kernel_size: Size of the window for neighboring frames to consider
+    decay_factor: Decay factor for neighboring frames, lower values reduce weight faster
+
+    Returns:
+    attention_mask: (batch_size, sequence_length, sequence_length)
+    """
+
+    kernel_size = frames
+
+    assert kernel_size % 2 == 1, "Kernel size must be odd to have a central frame."
+
+    num_tokens_per_frame = height * width
+    sequence_length = frames * num_tokens_per_frame
+
+    # Step 1: Create frame-level attention weights (frames, frames)
+    half_window = kernel_size // 2
+    weights = torch.tensor([
+        decay_factor ** abs(i - half_window) for i in range(kernel_size)
+    ])
+    
+    frame_attention = torch.zeros(frames, frames)
+    for i in range(frames):
+        for j in range(max(0, i - half_window), min(frames, i + half_window + 1)):
+            frame_attention[i, j] = weights[half_window + j - i]
+
+    # Step 2: Normalize frame-level weights
+    # frame_attention /= frame_attention.sum(dim=-1, keepdim=True)
+
+    # Step 3: Expand to token level (sequence_length, sequence_length)
+    token_attention = frame_attention.repeat_interleave(num_tokens_per_frame, dim=0)
+    token_attention = token_attention.repeat_interleave(num_tokens_per_frame, dim=1)
+
+    # Step 4: Expand to batch level (batch_size, sequence_length, sequence_length)
+    attention_mask = token_attention.unsqueeze(0).repeat(batch_size, 1, 1)
+
+    return attention_mask
+
+
+class CogVideoXTemporalCausalAttnProcessor2_0:
+    r"""
+    Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
+    query and key vectors, but does not include spatial normalization.
+    """
+
+    def __init__(self):
+        if not hasattr(F, "scaled_dot_product_attention"):
+            raise ImportError("CogVideoXAttnProcessor requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        latent_frame_num: int = 9,
+    ) -> torch.Tensor:
+        text_seq_length = encoder_hidden_states.size(1)
+
+        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+
+        # if attention_mask is not None:
+        attention_mask = create_temporal_attention_mask(batch_size).to(hidden_states.dtype).to(hidden_states.device)
+        
+        # print('creat temporal causal attention mask')
+        
+        full_mask = torch.zeros((batch_size, 226, 226), device=attention_mask.device).to(hidden_states.dtype) # 226 is text token
+        batch_size, n_full, _ = full_mask.shape
+        _, seq_len, _ = attention_mask.shape
+        
+        # full -> original
+        full_to_original = torch.zeros((batch_size, n_full, seq_len), device=attention_mask.device).to(hidden_states.dtype)
+        # original -> full
+        original_to_full = torch.zeros((batch_size, seq_len, n_full), device=attention_mask.device).to(hidden_states.dtype)
+
+        top = torch.cat([full_mask, full_to_original], dim=-1)  # (batch_size, n_full, n_full + seq_len)
+        bottom = torch.cat([original_to_full, attention_mask], dim=-1)  # (batch_size, seq_len, n_full + seq_len)
+        attention_mask = torch.cat([top, bottom], dim=-2)  # (batch_size, n_full + seq_len, n_full + seq_len)
+        
+        attention_mask = attention_mask.unsqueeze(1).repeat(1, attn.heads, 1, 1)
+        attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+
+        attention_mask = attention_mask.detach()
+
+        del full_mask
+        del full_to_original
+        del original_to_full
+        del top
+        del bottom
+        
+        # import pdb; pdb.set_trace()
+
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        # Apply RoPE if needed
+        if image_rotary_emb is not None:
+            from .embeddings import apply_rotary_emb
+
+            query[:, :, text_seq_length:] = apply_rotary_emb(query[:, :, text_seq_length:], image_rotary_emb)
+            if not attn.is_cross_attention:
+                key[:, :, text_seq_length:] = apply_rotary_emb(key[:, :, text_seq_length:], image_rotary_emb)
+
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
+
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        encoder_hidden_states, hidden_states = hidden_states.split(
+            [text_seq_length, hidden_states.size(1) - text_seq_length], dim=1
+        )
+        return hidden_states, encoder_hidden_states
+
+
+
+class CogVideoXTemporalCausalDecayAttnProcessor2_0:
+    r"""
+    Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
+    query and key vectors, but does not include spatial normalization.
+    """
+
+    def __init__(self):
+        if not hasattr(F, "scaled_dot_product_attention"):
+            raise ImportError("CogVideoXAttnProcessor requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        latent_frame_num: int = 13,
+    ) -> torch.Tensor:
+        text_seq_length = encoder_hidden_states.size(1)
+
+        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+
+        # if attention_mask is not None:
+        attention_mask = create_temporal_attention_mask_decay(batch_size, latent_frame_num).to(hidden_states.dtype).to(hidden_states.device)
+        
+        # print('creat temporal causal attention mask')
+        
+        full_mask = torch.zeros((batch_size, 226, 226), device=attention_mask.device).to(hidden_states.dtype) # 226 is text token
+        batch_size, n_full, _ = full_mask.shape
+        _, seq_len, _ = attention_mask.shape
+        
+        # full -> original
+        full_to_original = torch.zeros((batch_size, n_full, seq_len), device=attention_mask.device).to(hidden_states.dtype)
+        # original -> full
+        original_to_full = torch.zeros((batch_size, seq_len, n_full), device=attention_mask.device).to(hidden_states.dtype)
+
+        top = torch.cat([full_mask, full_to_original], dim=-1)  # (batch_size, n_full, n_full + seq_len)
+        bottom = torch.cat([original_to_full, attention_mask], dim=-1)  # (batch_size, seq_len, n_full + seq_len)
+        attention_mask = torch.cat([top, bottom], dim=-2)  # (batch_size, n_full + seq_len, n_full + seq_len)
+        
+        attention_mask = attention_mask.unsqueeze(1).repeat(1, attn.heads, 1, 1)
+        attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+
+        attention_mask = attention_mask.detach()
+
+        del full_mask
+        del full_to_original
+        del original_to_full
+        del top
+        del bottom
+        
+        # import pdb; pdb.set_trace()
+
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        # Apply RoPE if needed
+        if image_rotary_emb is not None:
+            from .embeddings import apply_rotary_emb
+
+            query[:, :, text_seq_length:] = apply_rotary_emb(query[:, :, text_seq_length:], image_rotary_emb)
+            if not attn.is_cross_attention:
+                key[:, :, text_seq_length:] = apply_rotary_emb(key[:, :, text_seq_length:], image_rotary_emb)
+
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
+
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        encoder_hidden_states, hidden_states = hidden_states.split(
+            [text_seq_length, hidden_states.size(1) - text_seq_length], dim=1
+        )
+        return hidden_states, encoder_hidden_states
+
+
 
 class FusedCogVideoXAttnProcessor2_0:
     r"""

@@ -44,9 +44,11 @@ import diffusers
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXImageToVideoPipeline,
     CogVideoXTransformer3DModel,
 )
+from diffusers.pipelines.cogvideo.pipeline_cogvideox_image2video_inject_fbf import CogVideoXImageToVideoPipeline
+
+
 from diffusers.models.embeddings import get_3d_rotary_pos_embed
 from diffusers.optimization import get_scheduler
 from diffusers.pipelines.cogvideo.pipeline_cogvideox import get_resize_crop_region_for_grid
@@ -66,8 +68,13 @@ import torchvision.transforms as TT
 import numpy as np
 from diffusers.image_processor import VaeImageProcessor
 
-from nuscenes_dataset_for_cogvidx import NuscenesDatasetAllframesForCogvidx
+from nuscenes_dataset_for_cogvidx import NuscenesDatasetFPS1OneByOneAnno
 
+sys.path.append('/home/user/wangxd/diffusers/deq-flow/code.v.2.0/core')
+
+from deq_flow import DEQFlow
+from deq.arg_utils import add_deq_args
+from utils.utils import InputPadder
 
 if is_wandb_available():
     import wandb
@@ -77,6 +84,87 @@ check_min_version("0.31.0.dev0")
 
 logger = get_logger(__name__)
 
+import torch
+import torch.fft as fft
+
+def flow_to_grayscale(u, v):
+    """
+    Converts the flow components u, v into a grayscale image representing the magnitude of the flow.
+
+    Args:
+        u (np.ndarray): Input horizontal flow of shape [H, W].
+        v (np.ndarray): Input vertical flow of shape [H, W].
+
+    Returns:
+        np.ndarray: Grayscale image of shape [H, W] with values in the range [0, 255].
+    """
+    magnitude = torch.sqrt(u*u+v*v)
+    
+    magnitude = magnitude.unsqueeze(0).unsqueeze(0)
+    
+    magnitude = torch.nn.functional.interpolate(magnitude, size=(60, 90), mode='bilinear', align_corners=False)
+    
+    magnitude = magnitude / (magnitude.max() + 1e-5) # [0, 1]
+    
+    # magnitude = magnitude.squeeze(0)
+    
+    return magnitude
+
+def flow_to_image(flow_uv, clip_flow=None, thresh=10):
+    """
+    Expects a two dimensional flow image of shape.
+
+    Args:
+        flow_uv (np.ndarray): Flow UV image of shape [H,W,2]
+        clip_flow (float, optional): Clip maximum of flow values. Defaults to None.
+        convert_to_bgr (bool, optional): Convert output image to BGR. Defaults to False.
+
+    Returns:
+        np.ndarray: Flow visualization image of shape [H,W,3]
+    """
+    assert flow_uv.ndim == 3, 'input flow must have three dimensions'
+    assert flow_uv.shape[2] == 2, 'input flow must have shape [H,W,2]'
+    
+    u = flow_uv[:,:,0]
+    v = flow_uv[:,:,1]
+    rad = torch.sqrt(u*u+v*v)
+    
+    mask = rad > thresh
+    u[~mask] = 0
+    v[~mask] = 0
+    
+    rad_max = rad.max()
+    epsilon = 1e-5
+    u = u / (rad_max + epsilon)
+    v = v / (rad_max + epsilon)
+    
+    return flow_to_grayscale(u, v)
+
+
+def fourier_filter(x, scale=0., d_s=0.1):
+    dtype = x.dtype
+    x = x.type(torch.float32)
+    # FFT
+    x_freq = fft.fftn(x, dim=(-2, -1))
+    x_freq = fft.fftshift(x_freq, dim=(-2, -1))
+
+    B, C, F, H, W = x_freq.shape
+    mask = torch.ones((B, C, F, H, W),device=x_freq.device)
+
+    for h in range(H):
+        for w in range(W):
+            d_square = (2 * h / H - 1) ** 2 + (2 * w / W - 1) ** 2
+            if d_square <= 2 * d_s:
+                mask[..., h, w] = scale
+
+    x_freq = x_freq * mask
+
+    # IFFT
+    x_freq = fft.ifftshift(x_freq, dim=(-2, -1))
+    x_filtered = fft.ifftn(x_freq, dim=(-2, -1)).real
+
+    x_filtered = x_filtered.type(dtype)
+    return x_filtered
 
 def get_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script for CogVideoX.")
@@ -301,7 +389,7 @@ def get_args():
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
-        default=None,
+        default="latest",
         help=(
             "Whether training should be resumed from a previous checkpoint. Use a path saved by"
             ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
@@ -449,6 +537,54 @@ def get_args():
         ),
     )
     parser.add_argument("--nccl_timeout", type=int, default=600, help="NCCL backend timeout in seconds.")
+    
+    # NOTE add for flow_model
+    parser.add_argument('--eval', action='store_true', help="Enable Eval mode.")
+    parser.add_argument('--test', action='store_true', help="Enable Test mode.")
+    parser.add_argument('--viz', action='store_true', help="Enable Viz mode.")
+    parser.add_argument('--fixed_point_reuse', action='store_true', help="Enable fixed point reuse.")
+    parser.add_argument('--warm_start', action='store_true', help="Enable warm start.")
+
+    parser.add_argument('--name', default='deq-flow', help="name your experiment")
+    parser.add_argument('--stage', help="determines which dataset to use for training") 
+
+    parser.add_argument('--total_run', type=int, default=1, help="total number of runs")
+    parser.add_argument('--start_run', type=int, default=1, help="begin from the given number of runs")
+    parser.add_argument('--restore_name', help="restore experiment name")
+    parser.add_argument('--resume_iter', type=int, default=-1, help="resume from the given iterations")
+
+    parser.add_argument('--tiny', action='store_true', help='use a tiny model for ablation study')
+    parser.add_argument('--large', action='store_true', help='use a large model')
+    parser.add_argument('--huge', action='store_true', help='use a huge model')
+    parser.add_argument('--gigantic', action='store_true', help='use a gigantic model')
+    parser.add_argument('--old_version', action='store_true', help='use the old design for flow head')
+
+    parser.add_argument('--restore_ckpt', help="restore checkpoint for val/test/viz")
+    parser.add_argument('--validation', type=str, nargs='+')
+    parser.add_argument('--test_set', type=str, nargs='+')
+    parser.add_argument('--viz_set', type=str, nargs='+')
+    parser.add_argument('--viz_split', type=str, nargs='+', default=['test'])
+    parser.add_argument('--output_path', help="output path for evaluation")
+
+    parser.add_argument('--eval_interval', type=int, default=5000, help="evaluation interval")
+    parser.add_argument('--save_interval', type=int, default=5000, help="saving interval")
+    parser.add_argument('--time_interval', type=int, default=500, help="timing interval")
+
+    parser.add_argument('--gma', action='store_true', help='use gma')
+
+    parser.add_argument('--image_size', type=int, nargs='+', default=[384, 512])
+    parser.add_argument('--schedule', type=str, default="onecycle", help="learning rate schedule")
+
+    parser.add_argument('--wdecay', type=float, default=.00005)
+    parser.add_argument('--epsilon', type=float, default=1e-8)
+    parser.add_argument('--clip', type=float, default=1.0)
+    parser.add_argument('--dropout', type=float, default=0.0)
+    parser.add_argument('--vdropout', type=float, default=0.0, help="variational dropout added to BasicMotionEncoder for DEQs")
+    parser.add_argument('--gamma', type=float, default=0.8, help='exponential weighting')
+    parser.add_argument('--add_noise', action='store_true')
+    parser.add_argument('--active_bn', action='store_true')
+    parser.add_argument('--all_grad', action='store_true', help="Remove the gradient mask within DEQ func.")
+    add_deq_args(parser)
 
     return parser.parse_args()
 
@@ -879,6 +1015,14 @@ def main(args):
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, 
     )
     
+    args.stage = "things"
+    args.gpus = 0
+    args.wnorm = True
+    args.f_thres = 40
+    args.f_solver =  "naive_solver"
+    args.huge = True
+    args.eval_factor = 3.0
+    
     def deepspeed_zero_init_disabled_context_manager():
         """
         returns either a context list that includes one that will disable zero.Init or an empty context list
@@ -896,12 +1040,22 @@ def main(args):
         vae = AutoencoderKLCogVideoX.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant, 
         )
+        
+        flow_model = DEQFlow(args)
+        state_dicts = torch.load("/home/user/wangxd/diffusers/deq-flow/code.v.2.0/deq-flow-H-things-test-1x.pth", map_location="cpu")
+        new_state_dict = {}
+        for k, v in state_dicts.items():
+            new_k = k[7:]
+            new_state_dict[new_k] = v
+        flow_model.load_state_dict(new_state_dict, strict=False)
+        flow_model.eval()
 
     # CogVideoX-2b weights are stored in float16
     # CogVideoX-5b and CogVideoX-5b-I2V weights are stored in bfloat16
     load_dtype = torch.bfloat16 if "5b" in args.pretrained_model_name_or_path.lower() else torch.float16
     transformer = CogVideoXTransformer3DModel.from_pretrained(
         args.pretrained_model_name_or_path,
+        # "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps1-1205-fbf-inherit1022/checkpoint-7000/",
         subfolder="transformer",
         # "/root/autodl-fs/CogVidx-2b-I2V-base-transfomer",
         torch_dtype=load_dtype,
@@ -909,6 +1063,17 @@ def main(args):
         variant=args.variant,
         in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
     )
+    
+    from safetensors import safe_open
+    tensors = {}
+    with safe_open(os.path.join("/home/user/wangxd/diffusers/CogVideoX-2b/transformer", "diffusion_pytorch_model.safetensors"), framework="pt", device='cpu') as f:
+        for k in f.keys():
+            if "patch_embed.proj" in k:
+                nk = k.replace("proj", "origin_proj")
+                tensors[nk] = f.get_tensor(k)
+                print(k)
+    
+    transformer.load_state_dict(tensors, strict=False)
     
     scheduler = CogVideoXDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler",)
 
@@ -920,6 +1085,8 @@ def main(args):
     # We only train the additional adapter LoRA layers
     text_encoder.requires_grad_(False)
     vae.requires_grad_(False)
+    flow_model.requires_grad_(False)
+    
     transformer.requires_grad_(True)
 
     # For mixed precision training we cast all non-trainable weights (vae, text_encoder and transformer) to half-precision
@@ -954,6 +1121,7 @@ def main(args):
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     transformer.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
+    flow_model.to(accelerator.device, dtype=torch.float32)
     
     transformer.train()
 
@@ -1025,6 +1193,15 @@ def main(args):
     
     # trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     trainable_parameters = list(transformer.parameters())
+    
+    # # NOTE XXX overwrite for DEBUG
+    # optimize_param = []
+    # for name, param in transformer.named_parameters():
+    #     param.requires_grad = False
+    #     if "proj" in name and "text" not in name:
+    #         param.requires_grad = True
+    #         optimize_param.append(param)
+    # trainable_parameters = optimize_param
 
     # import pdb; pdb.set_trace()
 
@@ -1048,8 +1225,19 @@ def main(args):
         video = video.permute(0, 2, 1, 3, 4)  # [B, C, F, H, W]
         image = video[:, :, :1].clone()
 
-        latent_dist = vae.encode(video).latent_dist
-
+        # with torch.no_grad():
+        frame_num = video.shape[2] # F
+        frames_latent = []
+        for idx in range(frame_num):
+            
+            frames_latent.append(vae.encode(video[:, :, idx:idx+1]).latent_dist.sample().cpu())
+        
+        latent_dist = torch.cat(frames_latent, dim=2) # frame by frame
+        # print(latent_dist.requires_grad)
+        # latent_dist.requires_grad_(False)
+        # latent_dist = vae.encode(video).latent_dist # single-pass
+        del frames_latent
+        
         image_noise_sigma = torch.normal(mean=-3.0, std=0.5, size=(1,), device=image.device)
         image_noise_sigma = torch.exp(image_noise_sigma).to(dtype=image.dtype)
         noisy_image = torch.randn_like(image) * image_noise_sigma[:, None, None, None, None] + image
@@ -1057,6 +1245,8 @@ def main(args):
             noisy_image = image
         image_latent_dist = vae.encode(noisy_image).latent_dist
 
+        latent_dist = latent_dist.detach()
+        
         return latent_dist, image_latent_dist
     
     def encode_prompt(prompt):
@@ -1070,20 +1260,44 @@ def main(args):
             requires_grad=False,
         )
     
+    def encode_optical(image1, image2):
+        with torch.no_grad():
+            padder = InputPadder(image1.shape, mode='kitti')
+            image1, image2 = padder.pad(image1[None].to(weight_dtype).to(accelerator.device), image2[None].to(weight_dtype).to(accelerator.device))
+
+            image1 = image1.to(next(flow_model.parameters()).dtype)
+            image2 = image2.to(next(flow_model.parameters()).dtype)
+            
+            # import pdb; pdb.set_trace()
+            _, flow_pr, _ = flow_model(image1, image2)
+            
+            flow = padder.unpad(flow_pr[0]).permute(1, 2, 0).cpu()
+
+            # print("after flow, exist Nan: ", torch.isnan(flow).any())
+            
+            img_flow = flow_to_image(flow) # [1, 1, h, w]
+
+            img_flow = img_flow.to(weight_dtype)
+        
+        return img_flow
+
+    
     # Dataset and DataLoader
-    train_dataset = NuscenesDatasetAllframesForCogvidx(
+    train_dataset = NuscenesDatasetFPS1OneByOneAnno(
         data_root=args.instance_data_root,
         height=args.height,
         width=args.width,
         max_num_frames=args.max_num_frames,
         encode_video=encode_video,
-        encode_prompt=encode_prompt
+        encode_prompt=encode_prompt,
+        encode_optical=encode_optical,
     )
 
 
     def collate_fn(examples):
         videos = []
         images = []
+        flows = []
         for example in examples:
             latent_dist, image_latent_dist = example["instance_video"]
 
@@ -1104,21 +1318,31 @@ def main(args):
 
             if random.random() < args.noised_image_dropout:
                 image_latents = torch.zeros_like(image_latents)
+                
+            # flow
+            flow = example["optical_flow"]
+            flows.append(flow) # [12, 1, 60, 90]
 
             videos.append(video_latents)
             images.append(image_latents)
+
+        flows = torch.stack(flows) # [24, 1, 60, 90]
 
         videos = torch.cat(videos)
         images = torch.cat(images)
         videos = videos.to(memory_format=torch.contiguous_format).float()
         images = images.to(memory_format=torch.contiguous_format).float()
+        
+        flows = flows.to(memory_format=torch.contiguous_format).float()
 
         prompts = [example["instance_prompt"].to(accelerator.device) for example in examples]
         prompts = torch.cat(prompts)
-
+        
+        
         return {
             "videos": (videos, images),
             "prompts": prompts,
+            "optical_flow": flows,
         }
 
     train_dataloader = DataLoader(
@@ -1239,6 +1463,14 @@ def main(args):
             with accelerator.accumulate(models_to_accumulate):
                 video_latents, image_latents = batch["videos"]
                 prompt_embeds = batch["prompts"]
+                
+                optical_flows = batch["optical_flow"] # [B, F-1, H, W]
+                # print(f"optical_flows: {optical_flows.shape}")
+                zero_pad = torch.zeros_like(optical_flows[:,:1])
+
+                optical_flows = torch.cat([optical_flows, zero_pad], dim=1) # [B, F, H, W]
+
+                # import pdb; pdb.set_trace()
 
                 video_latents = video_latents.to(dtype=weight_dtype)  # [B, F, C, H, W]
                 image_latents = image_latents.to(dtype=weight_dtype)  # [B, F, C, H, W], copy and repeat
@@ -1273,7 +1505,9 @@ def main(args):
                     if model_config.use_rotary_positional_embeddings
                     else None
                 )
-
+                
+                
+                image_latent = image_latents[:, :1] # take the first frame
                 # Predict the noise residual
                 model_output = transformer(
                     hidden_states=noisy_model_input,
@@ -1281,6 +1515,7 @@ def main(args):
                     timestep=timesteps,
                     image_rotary_emb=image_rotary_emb,
                     return_dict=False,
+                    image_latent = image_latent,
                 )[0]
                 model_pred = scheduler.get_velocity(model_output, noisy_video_latents, timesteps)
 
@@ -1291,6 +1526,8 @@ def main(args):
 
                 target = video_latents
 
+
+                
                 loss = torch.mean((weights * (model_pred - target) ** 2).reshape(batch_size, -1), dim=1)
                 
                 # visu conditional loss
@@ -1299,6 +1536,23 @@ def main(args):
                 loss_e = torch.mean((weights * (model_pred[:, -1] - target[:, -1]) ** 2)).detach()
                 
                 loss = loss.mean()
+
+                hf_loss = torch.mean((weights * (fourier_filter(model_pred) - fourier_filter(target)) ** 2).reshape(batch_size, -1), dim=1).mean()
+                
+                # flow weighting
+                # target [B, F, C, H, W]
+                # flow: [B, F, H, W]
+
+                # import pdb; pdb.set_trace()
+
+                # print("before flow loss, exist Nan: ", torch.isnan(optical_flows).any())
+
+                # optical_flows = optical_flows.unsqueeze(2) # [B, F, 1, H, W]
+                optical_flows = optical_flows.detach()
+                flow_loss = torch.mean((weights * ((optical_flows * model_pred) - (optical_flows * target)) ** 2).reshape(batch_size, -1), dim=1).mean()
+                
+                loss = loss + 0.1 * hf_loss + 1.0 * flow_loss
+
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
@@ -1347,6 +1601,8 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"loss": loss.detach().item(),
+                    "hf_loss": hf_loss.detach().item(),
+                    "flow_loss": flow_loss.detach().item(),
                     "loss_s": loss_s.detach().item(),
                     "loss_m": loss_m.detach().item(),
                     "loss_e": loss_e.detach().item(),
@@ -1369,7 +1625,8 @@ def main(args):
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                     vae = vae,
-                    text_encoder=text_encoder
+                    text_encoder=text_encoder,
+                    inject=True
                 )
 
                 validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
