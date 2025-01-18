@@ -66,16 +66,16 @@ pipe.to("cuda")
 print('Pipeline loaded!')
 
 
-# image_path = "/home/user/wangxd/diffusers/n008-2018-08-01-15-16-36-0400__CAM_FRONT__1533151671612404.jpg"
-# validation_prompt = "go straight. Overcast. Daytime. Urban, with tall buildings on both sides of the street. Vehicles, traffic lights, pedestrian crossings, and road markings"
+image_path = "/home/user/wangxd/diffusers/n008-2018-08-01-15-16-36-0400__CAM_FRONT__1533151671612404.jpg"
+validation_prompt = "go straight. Overcast. Daytime. Urban, with tall buildings on both sides of the street. Vehicles, traffic lights, pedestrian crossings, and road markings"
 
 
 # image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0802/n015-2018-10-02-10-50-40+0800__CAM_FRONT__1538448887162460.jpg"
 # image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0035/n015-2018-07-24-10-42-41+0800__CAM_FRONT__1532400189162460.jpg"
 
 
-image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0332/n008-2018-08-22-15-53-49-0400__CAM_FRONT__1534968257412404.jpg"
-validation_prompt = "Go straight. The sky is partly cloudy with some clouds scattered across the blue expanse. It appears to be daytime, as indicated by the natural light and shadows present in the video. The road is a two-lane street with yellow dividing lines. On both sides of the street, there are parked cars, buildings, and trees lining the sidewalks. The critical objects include the parked cars, buildings, trees, and the yellow dividing lines on the road."
+# image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0332/n008-2018-08-22-15-53-49-0400__CAM_FRONT__1534968257412404.jpg"
+# validation_prompt = "Go straight. The sky is partly cloudy with some clouds scattered across the blue expanse. It appears to be daytime, as indicated by the natural light and shadows present in the video. The road is a two-lane street with yellow dividing lines. On both sides of the street, there are parked cars, buildings, and trees lining the sidewalks. The critical objects include the parked cars, buildings, trees, and the yellow dividing lines on the road."
 
 
 # save_dir = "./infer_results/guidance_gan-loss-0110_ckpt_200"

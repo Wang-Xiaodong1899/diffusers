@@ -33,6 +33,7 @@ transformer = CogVideoXTransformer3DModel.from_pretrained(
         # "/data/wangxd/ckpt/cogvideox-A4-clean-image-distill-gan-explicit-L2-0106-2/checkpoint-200/fake_unet",
         # "/data/wangxd/ckpt/cogvideox-A4-clean-image-distill-gan-0110/checkpoint-100/fake_unet",
         "/data/wangxd/ckpt/cogvideox-A4-clean-image-distill-gan-explicit-loss-0111/checkpoint-200/fake_unet",
+        # "/data/wangxd/ckpt/cogvideox-A4-clean-image-distill-gan-explicit-loss-0110/checkpoint-100/fake_unet",
         torch_dtype=torch.bfloat16,
         # revision=None,
         # variant=None,
@@ -74,8 +75,8 @@ print('Pipeline loaded!')
 # image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0035/n015-2018-07-24-10-42-41+0800__CAM_FRONT__1532400189162460.jpg"
 
 
-image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0332/n008-2018-08-22-15-53-49-0400__CAM_FRONT__1534968257412404.jpg"
-validation_prompt = "Go straight. The sky is partly cloudy with some clouds scattered across the blue expanse. It appears to be daytime, as indicated by the natural light and shadows present in the video. The road is a two-lane street with yellow dividing lines. On both sides of the street, there are parked cars, buildings, and trees lining the sidewalks. The critical objects include the parked cars, buildings, trees, and the yellow dividing lines on the road."
+# image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0332/n008-2018-08-22-15-53-49-0400__CAM_FRONT__1534968257412404.jpg"
+# validation_prompt = "Go straight. The sky is partly cloudy with some clouds scattered across the blue expanse. It appears to be daytime, as indicated by the natural light and shadows present in the video. The road is a two-lane street with yellow dividing lines. On both sides of the street, there are parked cars, buildings, and trees lining the sidewalks. The critical objects include the parked cars, buildings, trees, and the yellow dividing lines on the road."
 
 
 save_dir = "./infer_results/gan-explicit-loss-0111-ckpt_200"
@@ -90,7 +91,8 @@ os.makedirs(save_dir, exist_ok=True)
 # image_path = "/data/wangxd/val_fps1/scene-0560/n008-2018-08-31-11-37-23-0400__CAM_FRONT__1535730420912404.jpg"
 
 
-# validation_prompt = "go straight. Overcast. Daytime. Urban, with tall buildings on both sides of the street. Vehicles, traffic lights, pedestrian crossings, and road markings. "
+image_path = "/home/user/wangxd/diffusers/val_fps1/scene-0104/n008-2018-08-01-15-16-36-0400__CAM_FRONT__1533151671612404.jpg"
+validation_prompt = "go straight. Overcast. Daytime. Urban, with tall buildings on both sides of the street. Vehicles, traffic lights, pedestrian crossings, and road markings. "
 
 
 # validation_prompt = "Go straigt. Sunny. Daytime. The road is a two-lane street with a white van driving ahead. There are trees on both sides of the road, and buildings can be seen in the distance. The white van, trees, and buildings."

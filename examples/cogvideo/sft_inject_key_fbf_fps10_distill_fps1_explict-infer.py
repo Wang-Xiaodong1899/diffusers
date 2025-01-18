@@ -81,6 +81,35 @@ check_min_version("0.31.0.dev0")
 
 logger = get_logger(__name__)
 
+import torch
+import torch.fft as fft
+
+def fourier_filter(x, scale=0., d_s=0.1):
+    dtype = x.dtype
+    x = x.type(torch.float32)
+    # FFT
+    x_freq = fft.fftn(x, dim=(-2, -1))
+    x_freq = fft.fftshift(x_freq, dim=(-2, -1))
+
+    B, C, F, H, W = x_freq.shape
+    mask = torch.ones((B, C, F, H, W),device=x_freq.device)
+
+    for h in range(H):
+        for w in range(W):
+            d_square = (2 * h / H - 1) ** 2 + (2 * w / W - 1) ** 2
+            if d_square <= 2 * d_s:
+                mask[..., h, w] = scale
+
+    x_freq = x_freq * mask
+
+    # IFFT
+    x_freq = fft.ifftshift(x_freq, dim=(-2, -1))
+    x_filtered = fft.ifftn(x_freq, dim=(-2, -1)).real
+
+    x_filtered = x_filtered.type(dtype)
+    return x_filtered
+
+
 
 def get_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script for CogVideoX.")
@@ -465,6 +494,18 @@ def get_args():
         default=1.0,
         help="trade-off for diffusion loss.",
     )
+    parser.add_argument(
+        "--hf_weight",
+        type=float,
+        default=0.5,
+        help="trade-off for hf loss.",
+    )
+    # annealing
+    parser.add_argument(
+        "--annealing",
+        action="store_true",
+        help="annealing timesteps",
+    )
 
 
     return parser.parse_args()
@@ -846,31 +887,14 @@ def main(args):
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     init_kwargs = InitProcessGroupKwargs(backend="nccl", timeout=timedelta(seconds=args.nccl_timeout))
-
-    from accelerate.utils import DeepSpeedPlugin
-
-    zero2_plugin_0 = DeepSpeedPlugin(hf_ds_config="/home/user/wangxd/diffusers/examples/cogvideo/zero2_config.json")
-    zero3_plugin_1 = DeepSpeedPlugin(hf_ds_config="/home/user/wangxd/diffusers/examples/cogvideo/zero3_config.json")
-
-    deepspeed_plugins = {"student": zero2_plugin_0, "teacher": zero3_plugin_1}
-
     accelerator = Accelerator(
-        deepspeed_plugins=deepspeed_plugins,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
         kwargs_handlers=[ddp_kwargs, init_kwargs],
     )
-    teach_accelerator = Accelerator()
-
-    # accelerator = Accelerator(
-    #     gradient_accumulation_steps=args.gradient_accumulation_steps,
-    #     mixed_precision=args.mixed_precision,
-    #     log_with=args.report_to,
-    #     project_config=accelerator_project_config,
-    #     kwargs_handlers=[ddp_kwargs, init_kwargs],
-    # )
-
+    
     # Disable AMP for MPS.
     if torch.backends.mps.is_available():
         accelerator.native_amp = False
@@ -947,16 +971,9 @@ def main(args):
     load_dtype = torch.bfloat16 if "5b" in args.pretrained_model_name_or_path.lower() else torch.float16
     # optimized model
     transformer = CogVideoXTransformer3DModel.from_pretrained(
-        "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps1-1219-fbf-noaug/checkpoint-6000",
-        subfolder="transformer",
-        torch_dtype=load_dtype,
-        revision=args.revision,
-        variant=args.variant,
-        in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
-    )
-    # fake model, for diffusion loss
-    fake_transformer = CogVideoXTransformer3DModel.from_pretrained(
-        "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps1-1219-fbf-noaug/checkpoint-6000",
+        # "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps1-1219-fbf-noaug/checkpoint-6000",
+        # "/data/wangxd/ckpt/cogvideox-A4-clean-image-inject-f13-fps1-0109-fbf-fft/checkpoint-1200", # coarse fft
+        "/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111/checkpoint-100",
         subfolder="transformer",
         torch_dtype=load_dtype,
         revision=args.revision,
@@ -987,7 +1004,6 @@ def main(args):
     fine_transformer.requires_grad_(False)
     
     transformer.requires_grad_(True)
-    fake_transformer.requires_grad_(True)
 
     # For mixed precision training we cast all non-trainable weights (vae, text_encoder and transformer) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
@@ -1025,11 +1041,9 @@ def main(args):
     fine_transformer.eval()
     
     transformer.train()
-    fake_transformer.train()
 
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
-        fake_transformer.enable_gradient_checkpointing()
 
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
@@ -1096,7 +1110,6 @@ def main(args):
     
     # trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     trainable_parameters = list(transformer.parameters())
-    trainable_fake_parameters = list(fake_transformer.parameters())
     
     # # NOTE XXX overwrite for DEBUG
     # optimize_param = []
@@ -1123,23 +1136,6 @@ def main(args):
     )
 
     optimizer = get_optimizer(args, params_to_optimize, use_deepspeed=use_deepspeed_optimizer)
-
-    # second optimizer
-    fake_transformer_parameters_with_lr = {"params": trainable_fake_parameters, "lr": args.learning_rate}
-    fake_params_to_optimize = [fake_transformer_parameters_with_lr]
-
-    use_deepspeed_optimizer = (
-        accelerator.state.deepspeed_plugin is not None
-        and "optimizer" in accelerator.state.deepspeed_plugin.deepspeed_config
-    )
-    use_deepspeed_scheduler = (
-        accelerator.state.deepspeed_plugin is not None
-        and "scheduler" in accelerator.state.deepspeed_plugin.deepspeed_config
-    )
-
-    fake_optimizer = get_optimizer(args, fake_params_to_optimize, use_deepspeed=use_deepspeed_optimizer)
-
-
 
     def encode_video(video):
         video = video.to(accelerator.device, dtype=vae.dtype).unsqueeze(0)
@@ -1256,24 +1252,10 @@ def main(args):
             total_num_steps=args.max_train_steps * accelerator.num_processes,
             num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
         )
-        fake_lr_scheduler = DummyScheduler(
-            name=args.lr_scheduler,
-            optimizer=fake_optimizer,
-            total_num_steps=args.max_train_steps * accelerator.num_processes,
-            num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        )
     else:
         lr_scheduler = get_scheduler(
             args.lr_scheduler,
             optimizer=optimizer,
-            num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-            num_training_steps=args.max_train_steps * accelerator.num_processes,
-            num_cycles=args.lr_num_cycles,
-            power=args.lr_power,
-        )
-        fake_lr_scheduler = get_scheduler(
-            args.lr_scheduler,
-            optimizer=fake_optimizer,
             num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
             num_training_steps=args.max_train_steps * accelerator.num_processes,
             num_cycles=args.lr_num_cycles,
@@ -1285,14 +1267,6 @@ def main(args):
         transformer, optimizer, train_dataloader, lr_scheduler
     )
 
-    # now teach accelerator
-    teach_accelerator.state.select_deepspeed_plugin("teacher")
-    zero3_plugin_1.deepspeed_config["train_micro_batch_size_per_gpu"] = zero2_plugin_0.deepspeed_config[
-        "train_micro_batch_size_per_gpu"
-    ]
-    fake_transformer, fake_optimizer, fake_lr_scheduler = teach_accelerator.prepare(
-        fake_transformer, fake_optimizer, fake_lr_scheduler
-    )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1364,14 +1338,12 @@ def main(args):
 
     for epoch in range(first_epoch, args.num_train_epochs):
         transformer.train()
-        fake_transformer.train()
-
         for step, batch in enumerate(train_dataloader):
             # print(unwrap_model(transformer).patch_embed.proj.weight)
             # print(unwrap_model(transformer).patch_embed.proj.weight.shape)
             # models_to_accumulate = [transformer]
 
-            with accelerator.accumulate(transformer, fake_transformer):
+            with accelerator.accumulate(transformer):
                 video_latents, _ = batch["videos"]
                 prompt_embeds = batch["prompts"]
                 
@@ -1413,19 +1385,30 @@ def main(args):
                 continue_image_latents = torch.cat([continue_image_latents, latent_padding], dim=1) # copy and repeat [B*L, 13, C, H, W]
 
                 
+                
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
                     0, scheduler.config.num_train_timesteps, (batch_size,), device=coarse_video_latents.device
                 )
                 timesteps = timesteps.long()
 
+                if args.annealing:
+                    num_infer_steps = 50 # same with DDIM steps
+                    scheduler.set_timesteps(num_infer_steps, device = continue_video_latents.device)
+                    timesteps_list = scheduler.timesteps
+                    
+                    import random
+                    timesteps = timesteps_list[random.randint(0, len(timesteps_list)-1)]
+                    timesteps = timesteps.long()
+                    timesteps = timesteps.expand(coarse_video_latents.shape[0])
+                    # set back
+                    scheduler.set_timesteps(scheduler.config.num_train_timesteps, device = continue_video_latents.device)
+
                 # Sample noise that will be added to the latents
                 noise = torch.randn_like(coarse_video_latents).to(weight_dtype)
 
                 # Add noise to the model input according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                # NOTE set scheduler timesteps back to 1000
-                # scheduler.set_timesteps(scheduler.config.num_train_timesteps, device = continue_video_latents.device)
                 noisy_coarse_video_latents = scheduler.add_noise(coarse_video_latents, noise, timesteps)
                 noisy_model_input = torch.cat([noisy_coarse_video_latents, coarse_image_latents], dim=2)
 
@@ -1458,112 +1441,15 @@ def main(args):
                 
                 clean_x_0 = scheduler.get_velocity(model_output, noisy_coarse_video_latents, timesteps) # student clean x_0, [0, 1, ..., 12]
                 
-                origin_clean_x_0 = clean_x_0
-
-
-                if args.diff_weight > 0:
-                    # compute diffusion loss for fake-DiT
-                    # Sample a random timestep for each image
-                    fake_timesteps = torch.randint(
-                        0, scheduler.config.num_train_timesteps, (batch_size,), device=coarse_video_latents.device
-                    )
-                    fake_timesteps = fake_timesteps.long()
-                    noise = torch.randn_like(clean_x_0).to(weight_dtype)
-                    # detach clean_x_0 to stop backpack
-                    noisy_coarse_fake_video_latents = scheduler.add_noise(clean_x_0.detach(), noise, fake_timesteps)
-                    fake_noisy_model_input = torch.cat([noisy_coarse_fake_video_latents, coarse_image_latents], dim=2)
-                    fake_model_output = fake_transformer(
-                        hidden_states=fake_noisy_model_input,
-                        encoder_hidden_states=prompt_embeds,
-                        timestep=fake_timesteps,
-                        image_rotary_emb=image_rotary_emb,
-                        return_dict=False,
-                        image_latent = image_latent,
-                    )[0]
-                    fake_model_target = scheduler.get_velocity(fake_model_output, noisy_coarse_fake_video_latents, fake_timesteps)
-
-                    # diffusion loss
-                    target = coarse_video_latents
-
-                    alphas_cumprod = scheduler.alphas_cumprod[timesteps]
-                    weights = 1 / (1 - alphas_cumprod)
-                    while len(weights.shape) < len(clean_x_0.shape):
-                        weights = weights.unsqueeze(-1)
-                    
-                    loss = torch.mean((weights * (fake_model_target - target) ** 2).reshape(batch_size, -1), dim=1)
-                    diffusion_loss = loss.mean() # backward with teach accelerator
-                    teach_accelerator.backward(diffusion_loss*args.diff_weight)
-                    fake_optimizer.step()
-                    fake_optimizer.zero_grad()
-                    optimizer.zero_grad()
-                    fake_lr_scheduler.step()
-                
-                
                 with torch.no_grad():
-                    
-                    # NOTE SDS implementation
-                    # get timestep, then DMD loss
-                    # timesteps = torch.randint(
-                    #     0, scheduler.config.num_train_timesteps, (batch_size,), device=coarse_video_latents.device
-                    # )
-                    # timesteps = timesteps.long()
-                    
-                    # noise = torch.randn_like(clean_x_0).to(weight_dtype)
-
-                    # # student pred x^hat_0
-                    # noisy_coarse_video_latents = scheduler.add_noise(clean_x_0, noise, timesteps)
-                    # noisy_model_input = torch.cat([noisy_coarse_video_latents, coarse_image_latents], dim=2)
-                    # model_output = fake_transformer(
-                    #     hidden_states=noisy_model_input,
-                    #     encoder_hidden_states=prompt_embeds,
-                    #     timestep=timesteps,
-                    #     image_rotary_emb=image_rotary_emb,
-                    #     return_dict=False,
-                    #     image_latent = image_latent,
-                    # )[0]
-                    # fake_output = scheduler.get_velocity(model_output, noisy_coarse_video_latents, timesteps) # student clean x_0
-                    
-                    
-                    # NOTE DDIM SDS
-                    num_infer_steps = 10
-                    scheduler.set_timesteps(num_infer_steps, device = continue_video_latents.device)
-                    timesteps = scheduler.timesteps
-                    noise = torch.randn_like(clean_x_0).to(weight_dtype)
-                    # student pred x^hat_0
-                    
-                    import random
-                    # choose_timestep_idx = step % len(timesteps) # [0, len-1], avoid different time for each GPU
-                    # choose_timestep_idx = random.randint(0, len(timesteps)-1)
-                    choose_timestep_idx = 5
-                    timesteps = timesteps[choose_timestep_idx:]
-                    # NOTE DDIM multi-step denoising the noisy latent
-                    
-                    noisy_coarse_video_latents = scheduler.add_noise(clean_x_0, noise, timesteps[0])
-                    old_pred_original_sample = None
-                    for i, t in enumerate(timesteps):
-                        noisy_model_input = torch.cat([noisy_coarse_video_latents, coarse_image_latents], dim=2)
-                        model_output = fake_transformer(
-                            hidden_states=noisy_model_input,
-                            encoder_hidden_states=prompt_embeds,
-                            timestep=t.expand(noisy_model_input.shape[0]),
-                            image_rotary_emb=image_rotary_emb,
-                            return_dict=False,
-                            image_latent = image_latent,
-                        )[0]
-                        noisy_coarse_video_latents, old_pred_original_sample = scheduler.step(
-                            model_output,
-                            old_pred_original_sample,
-                            t,
-                            timesteps[i - 1] if i > 0 else None,
-                            noisy_coarse_video_latents,
-                            return_dict=False,
-                        )
-                    fake_output = noisy_coarse_video_latents
-                    
-                    
+                    # import pdb; pdb.set_trace()
+                    # teacher pred x^hat_0
+                    # lack continue pred, here use GT internal continue latent, [pred_x0, GT_latent, pred_x0]
+                    # continue_video_latents # [B*L, 13, C, H, W]
+                    # insert clean_x_0 # b (l f) c h w
                     post_continue_video_latents = []
                     for b_idx in range(continue_video_latents.shape[0]):
-                        post_continue_video_latents.append(torch.cat([ clean_x_0[0, b_idx: b_idx+1], continue_video_latents[b_idx, 1:-1], clean_x_0[0, b_idx+1: b_idx+2]]) ) # [13, c, h, w]
+                        post_continue_video_latents.append(torch.cat([ continue_video_latents[b_idx, :] ]) ) # [13, c, h, w]
                     
                     post_continue_video_latents = torch.stack(post_continue_video_latents, dim=0)
                     
@@ -1571,7 +1457,7 @@ def main(args):
                     clean_teacher = []
                     for b_idx in range(post_continue_video_latents.shape[0]):
                         current_continue_latents = post_continue_video_latents[b_idx:b_idx+1]
-                        noisy_current_continue_latents = scheduler.add_noise(current_continue_latents, noise, timesteps[0])
+                        noisy_current_continue_latents = scheduler.add_noise(current_continue_latents, noise, timesteps)
 
                         # noisy_model_input = torch.cat([noisy_current_continue_latents, continue_video_latents[b_idx, :1]], dim=2)
                         current_continue_image_latent = continue_video_latents[b_idx:b_idx+1, :1]
@@ -1580,92 +1466,63 @@ def main(args):
                         latent_padding = current_continue_image_latent.new_zeros(padding_shape)
                         current_continue_image_latent = torch.cat([current_continue_image_latent, latent_padding], dim=1)
                         
-                        
-                        # NOTE SDS loss
-                        # noisy_model_input = torch.cat([noisy_current_continue_latents, current_continue_image_latent], dim=2)
-                        # noisy_model_input = noisy_model_input.to(weight_dtype)
+                        noisy_model_input = torch.cat([noisy_current_continue_latents, current_continue_image_latent], dim=2)
+                        noisy_model_input = noisy_model_input.to(weight_dtype)
 
-                        # current_output = fine_transformer(
-                        #     hidden_states=noisy_model_input,
-                        #     encoder_hidden_states=prompt_embeds,
-                        #     timestep=timesteps,
-                        #     image_rotary_emb=image_rotary_emb,
-                        #     return_dict=False,
-                        #     image_latent=current_continue_image_latent[:, :1],
-                        # )[0]
+                        current_output = fine_transformer(
+                            hidden_states=noisy_model_input,
+                            encoder_hidden_states=prompt_embeds,
+                            timestep=timesteps,
+                            image_rotary_emb=image_rotary_emb,
+                            return_dict=False,
+                            image_latent=current_continue_image_latent[:, :1],
+                        )[0]
 
-                        # # [1, 13, c, h, w]
-                        # current_clean_teach = scheduler.get_velocity(current_output, noisy_current_continue_latents, timesteps)
+                        # [1, 13, c, h, w]
+                        current_clean_teach = scheduler.get_velocity(current_output, noisy_current_continue_latents, timesteps)
 
-                        # if b_idx == 0:
-                        #     clean_teacher.append(current_clean_teach[:, :1])
-                        #     clean_teacher.append(current_clean_teach[:, -1:])
-                        # else:
-                        #     clean_teacher.append(current_clean_teach[:, -1:])
-                        
-                        
-                        # NOTE DDIM SDS loss
-                        old_pred_original_sample = None
-                        for i, t in enumerate(timesteps):
-                            noisy_model_input = torch.cat([noisy_current_continue_latents, current_continue_image_latent], dim=2)
-                            noisy_model_input = noisy_model_input.to(weight_dtype)
-
-                            current_output = fine_transformer(
-                                hidden_states=noisy_model_input,
-                                encoder_hidden_states=prompt_embeds,
-                                timestep=t.expand(noisy_model_input.shape[0]),
-                                image_rotary_emb=image_rotary_emb,
-                                return_dict=False,
-                                image_latent=current_continue_image_latent[:, :1],
-                            )[0]
-                            noisy_current_continue_latents, old_pred_original_sample = scheduler.step(
-                                current_output,
-                                old_pred_original_sample,
-                                t,
-                                timesteps[i - 1] if i > 0 else None,
-                                noisy_current_continue_latents,
-                                return_dict=False,
-                            )
-                        current_clean_teach = noisy_current_continue_latents
-                        
                         if b_idx == 0:
                             clean_teacher.append(current_clean_teach[:, :1])
                             clean_teacher.append(current_clean_teach[:, -1:])
                         else:
                             clean_teacher.append(current_clean_teach[:, -1:])
-                        
-                    
+
                     real_output = torch.cat(clean_teacher, dim=1) # [b, 13, c, h, w]
-                    
-
-                    p_fake = (clean_x_0 - fake_output) # [b, 13, C, H, W]
-                    p_real = (clean_x_0 - real_output) # [b, 13, C, H, W]
-
-
-                    grad = (p_real - p_fake) / torch.abs(p_real).mean(dim=[1, 2, 3, 4], keepdim=True) 
-                    grad = torch.nan_to_num(grad)
                 
-                distill_loss = 0.5 * F.mse_loss(clean_x_0.float(), (origin_clean_x_0-grad).detach().float(), reduction="mean") 
+                alphas_cumprod = scheduler.alphas_cumprod[timesteps]
+                weights = 1 / (1 - alphas_cumprod)
+                while len(weights.shape) < len(clean_x_0.shape):
+                    weights = weights.unsqueeze(-1)
 
+                # L2 explicit loss
+                distill_loss = weights.squeeze() * F.mse_loss(clean_x_0.float(), real_output.detach().float(), reduction="mean")
+
+                # L1 explicit loss
+                # distill_loss = F.l1_loss(clean_x_0.float(), real_output.detach().float(), reduction="mean")
                 
-                # if args.diff_weight > 0:
-                #     loss = diffusion_loss * args.diff_weight + distill_loss * args.dis_weight
-                # else:
-                #     loss = distill_loss * args.dis_weight
+                # diffusion maintain loss
+                target = coarse_video_latents.detach()
                 
-                accelerator.backward(distill_loss*args.dis_weight)
+                
+                if args.diff_weight > 0:
+                    loss = torch.mean((weights * (clean_x_0 - target) ** 2).reshape(batch_size, -1), dim=1)
+                    diffusion_loss = loss.mean()
+                    loss = distill_loss * args.dis_weight + diffusion_loss * args.diff_weight
+                else:
+                    loss = distill_loss * args.dis_weight
+                
+                if args.hf_weight > 0:
+                    hf_loss = torch.mean((weights * (fourier_filter(clean_x_0) - fourier_filter(target)) ** 2).reshape(batch_size, -1), dim=1).mean()
+                    loss = loss + hf_loss * args.hf_weight
+                
+                accelerator.backward(loss)
                 optimizer.step()
-                fake_optimizer.zero_grad()
                 optimizer.zero_grad()
                 lr_scheduler.step()
 
                 if accelerator.sync_gradients:
                     params_to_clip = trainable_parameters
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-
-                # if accelerator.state.deepspeed_plugin is None:
-                
-                
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -1699,10 +1556,10 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-            logs = {
-                    # "loss": loss.detach().item(),
-                    # "diffusion_loss": diffusion_loss.detach().item(),
+            logs = {"loss": loss.detach().item(),
                     "distill_loss": distill_loss.detach().item(),
+                    "hf_loss": hf_loss.detach().item() if args.hf_weight>0 else 0,
+                    # "diffusion_loss": diffusion_loss.detach().item(),
                     # "loss_s": loss_s.detach().item(),
                     # "loss_e": loss_e.detach().item(),
                     "lr": lr_scheduler.get_last_lr()[0]}
@@ -1712,28 +1569,26 @@ def main(args):
             if global_step >= args.max_train_steps:
                 break
 
-        if accelerator.is_main_process:
-            # if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
-            if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
-                # Create pipeline
-                pipe = CogVideoXImageToVideoPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    transformer=unwrap_model(transformer),
-                    scheduler=scheduler,
-                    revision=args.revision,
-                    variant=args.variant,
-                    torch_dtype=weight_dtype,
-                    vae = vae,
-                    text_encoder=text_encoder,
-                    inject=True
-                )
+            if accelerator.is_main_process:
+                # if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
+                if args.validation_prompt is not None and (step + 1) % args.validation_epochs == 0:
+                    # Create pipeline
+                    pipe = CogVideoXImageToVideoPipeline.from_pretrained(
+                        args.pretrained_model_name_or_path,
+                        transformer=unwrap_model(transformer),
+                        scheduler=scheduler,
+                        revision=args.revision,
+                        variant=args.variant,
+                        torch_dtype=weight_dtype,
+                        vae = vae,
+                        text_encoder=text_encoder,
+                        inject=True
+                    )
 
-                validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
-                validation_images = args.validation_images.split(args.validation_prompt_separator)
+                    validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
+                    validation_images = args.validation_images.split(args.validation_prompt_separator)
 
-                # for validation_image, validation_prompt in zip(validation_images, validation_prompts):
-                for validation_image in validation_images:
-                    for validation_prompt in validation_prompts:
+                    for validation_image, validation_prompt in zip(validation_images, validation_prompts):
                         pipeline_args = {
                             "image": load_image(validation_image),
                             "prompt": validation_prompt,
@@ -1749,7 +1604,7 @@ def main(args):
                             args=args,
                             accelerator=accelerator,
                             pipeline_args=pipeline_args,
-                            epoch=epoch,
+                            epoch=step,
                         )
 
     # Save the lora layers

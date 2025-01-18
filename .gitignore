@@ -187,3 +187,5 @@ cogvideox-D4-clean-image-sft-1022
 *.txt
 *.jsonl
 *.csv
+*.pt
+*.pth
