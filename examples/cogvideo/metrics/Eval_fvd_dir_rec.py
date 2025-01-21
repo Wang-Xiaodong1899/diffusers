@@ -131,8 +131,8 @@ def main(
     real_videos = np.array(real_videos)
     print(f'real shape {real_videos.shape}')
 
-    # fvd_score = compute_fvd(real_videos, syn_videos, i3d_model, i3d_device)
-    fvd_score = compute_fvd_1(real_videos, syn_videos, i3d_model, i3d_device)
+    fvd_score = compute_fvd(real_videos, syn_videos, i3d_model, i3d_device)
+    # fvd_score = compute_fvd_1(real_videos, syn_videos, i3d_model, i3d_device)
     
     print('Save Done!')
 

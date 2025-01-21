@@ -51,6 +51,6 @@ def add_random_noise_to_images(input_dir, output_dir, noise_level=30, seed=None)
     print(f"Processed {len(image_files)} images. Noisy images saved to '{output_dir}'.")
 
 # 示例用法
-input_directory = "/home/user/wangxd/diffusers/visu/scene-0104-fps1"  # 输入图像文件夹
-output_directory = "/home/user/wangxd/diffusers/visu/scene-0104-fps1-ori"   # 输出图像文件夹
-add_random_noise_to_images(input_directory, output_directory, noise_level=0, seed=42)
+input_directory = "/home/user/wangxd/diffusers/raw"  # 输入图像文件夹
+output_directory = "/home/user/wangxd/diffusers/raw-noise"   # 输出图像文件夹
+add_random_noise_to_images(input_directory, output_directory, noise_level=90, seed=42)

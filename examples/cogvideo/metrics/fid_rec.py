@@ -13,7 +13,7 @@ from scipy import linalg
 from torch.nn.functional import adaptive_avg_pool2d
 import fire
 
-from common import image2arr, pil2arr, mp4toarr, image2pil, json2data
+from common import image2arr, pil2arr, mp4toarr, image2pil, json2data, preprocess_image
 
 try:
     from tqdm import tqdm
@@ -31,6 +31,11 @@ from nuscenes_dataset_for_cogvidx import NuscenesDatasetAllframesFPS10OneByOneFo
 IMAGE_EXTENSIONS = {'bmp', 'jpg', 'jpeg', 'pgm', 'png', 'ppm',
                     'tif', 'tiff', 'webp'}
 
+import torchvision.transforms as TT
+resize_transform = TT.Compose([
+    TT.Resize((480, 720)),
+])
+
 
 class ImagePathDataset(torch.utils.data.Dataset):
     def __init__(self, files, transforms=None):
@@ -43,16 +48,19 @@ class ImagePathDataset(torch.utils.data.Dataset):
     def __getitem__(self, i):
         path = self.files[i]
         # path -> frame path
+        # img = resize_transform(Image.open(path).convert('RGB'))
+        # img = preprocess_image(img)
         img = Image.open(path).convert('RGB')
         if self.transforms is not None:
             img = self.transforms(img)
         return img
 
 class VideoPathDataset(torch.utils.data.Dataset):
-    def __init__(self, files, transforms=None, frames=38):
+    def __init__(self, files, transforms=None, frames=25, start=0):
         self.files = files
         self.transforms = transforms
         self.frames = frames
+        self.start = start
 
     def __len__(self):
         return len(self.files)
@@ -62,10 +70,11 @@ class VideoPathDataset(torch.utils.data.Dataset):
         # path -> video path
 
         video_arr = mp4toarr(path)
-        video = video_arr[:self.frames]
+        video = video_arr[self.start:self.frames]
         images = []
         for frame in video:
-            img = Image.fromarray(frame).convert('RGB')
+            # img = preprocess_image(Image.fromarray(frame))
+            img = Image.fromarray(frame)
             if self.transforms is not None:
                 img = self.transforms(img)
             images.append(img)
@@ -137,7 +146,8 @@ def main(
     eval_frames=25,
     batch_size=16, 
     device='cuda:5', 
-    dims=2048, 
+    dims=2048,
+    frame_start=0,
     num_workers=4,
     val_array = [(0,10), (10, 20),(20, 30), (30, 40), (40, 50),(50,60),(60, 70), (70, 80), (80, 90),(90,100),(100,110),(110,120),(120,130),(130,140),(140,150)],
 ):
@@ -184,17 +194,18 @@ def main(
             for key_idx in tqdm(range(len(item))):
                 key_frame = item[key_idx]
                 pil_videos_path = key_frame["instance_video"]
-                real_frames_paths.extend(pil_videos_path[:eval_frames])
+                real_frames_paths.extend(pil_videos_path[frame_start:eval_frames])
     
     print(f'GT length {len(real_frames_paths)}')
     
     # video dataset
-    video_dataset = VideoPathDataset(syn_videos_paths, transforms=TF.ToTensor(), frames=eval_frames)
+    video_dataset = VideoPathDataset(syn_videos_paths, transforms=TF.ToTensor(), frames=eval_frames, start=frame_start)
     video_dataloader = torch.utils.data.DataLoader(video_dataset,
                                              batch_size=1,
                                              shuffle=False,
                                              drop_last=False,
                                              num_workers=num_workers)
+    
     frame_dataset = ImagePathDataset(real_frames_paths, transforms=TF.ToTensor())
     frame_dataloader = torch.utils.data.DataLoader(frame_dataset,
                                              batch_size=batch_size,
@@ -202,11 +213,12 @@ def main(
                                              drop_last=False,
                                              num_workers=num_workers)
     # video
-    pred_arr = np.empty((len(syn_videos_paths)*eval_frames, dims))
+    pred_arr = np.empty((len(syn_videos_paths)*(eval_frames-frame_start), dims))
     print(f'pred arr shape: {pred_arr.shape}')
 
     start_idx = 0
 
+    # 24 frames if skip condition
     for batch in tqdm(video_dataloader):
         batch = batch.to(device)
         batch = batch.flatten(0,1)
