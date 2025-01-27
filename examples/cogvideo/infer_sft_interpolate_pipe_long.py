@@ -137,13 +137,18 @@ def main(val_s: int=0, val_e: int=10, num_frames: int=5, start_frame: int=2, ite
     for i in tqdm(range(val_s, val_e)): # each scene
         item = train_dataset[i] # total samples in a scene
         cur_item_nums = 0 # NOTE if already generate x samples for a scene, add to cur_item_nums, and also add to item_per_scene
+        cur_item_nums = 5 #
+        # if have 5 samples, cur_item_nums = 5
+        key_indexs = [5, 9, 13, 17, 21, 25, 29, min(33, len(item)-1)]
         for key_idx in tqdm(range(len(item))):
-            cur_item_nums = cur_item_nums + 1 # practical inference items
-            if cur_item_nums > item_per_scene:
+            if key_idx in key_indexs:
+                pass # need generate
+            else:
                 global_key_idx = global_key_idx + 1
                 continue
-            # # debug
-            # if global_key_idx < 322:
+            cur_item_nums = cur_item_nums + 1 # practical inference items
+            
+            # if cur_item_nums > item_per_scene:
             #     global_key_idx = global_key_idx + 1
             #     continue
             

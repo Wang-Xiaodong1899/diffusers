@@ -25,7 +25,7 @@ class FrechetVideoDistance(torchmetrics.Metric):
     i3d_min = 10
 
     def __init__(
-        self, inception_3d_checkpoint_path: str = "/home/user/wangxd/diffusers/examples/cogvideo/metrics/i3d_pretrained_400.pt", sequence_count: int = 16,
+        self, inception_3d_checkpoint_path: str = "/home/user/wangxd/diffusers/examples/cogvideo/metrics/i3d_pretrained_400.pt", sequence_count: int = -1,
         num_classes: int = 400, **kwargs
     ):
         super().__init__(**kwargs)
