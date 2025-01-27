@@ -85,7 +85,6 @@ def main(val_s: int=0, val_e: int=10, rollout: int=10):
             torch_dtype=torch.float16,
             revision=None,
             variant=None,
-            in_channels=32, low_cpu_mem_usage=False, ignore_mismatched_sizes=True
         )
 
     vae = AutoencoderKLCogVideoX.from_pretrained(
