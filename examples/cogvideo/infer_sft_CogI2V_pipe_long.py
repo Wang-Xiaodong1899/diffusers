@@ -65,7 +65,7 @@ def extract_frames(mp4_path, output_dir, fps):
     video.release()
     # print(f"Extracted {saved_count} frames to {output_dir}")
 
-def main(val_s: int=0, val_e: int=10, rollout: int=3):
+def main(val_s: int=0, val_e: int=10, rollout: int=10):
 
     pretrained_model_name_or_path = "/data/wuzhirong/hf-models/CogVideoX-5b-I2V"
     
@@ -116,7 +116,7 @@ def main(val_s: int=0, val_e: int=10, rollout: int=3):
     # prompts = ["turn left", "go straight", "wait"]
 
     train_dataset = NuscenesDatasetAllframesFPS10OneByOneForValidate(
-            data_root="/data/wangxd/nuscenes/",
+            data_root="/volsparse3/wxd/data/nuscenes",
             height=480,
             width=720,
             max_num_frames=2,
@@ -124,14 +124,14 @@ def main(val_s: int=0, val_e: int=10, rollout: int=3):
             encode_prompt=None,
         )
     
-    root_dir = "/data/wangxd/IJCAI25/Ablation/CogI2V"
+    root_dir = "/volsparse3/wxd/ICML/Ablation/CogI2V"
     
     os.makedirs(root_dir, exist_ok=True)
 
     for i in tqdm(range(val_s, val_e)): # each scene
         item = train_dataset[i] # total samples in a scene
         # if have 5 samples, cur_item_nums = 5
-        key_indexs = range(5)
+        key_indexs = range(1)
         for key_idx in tqdm(key_indexs):
             key_frame = item[key_idx]
             pil_videos = key_frame["instance_video"]
