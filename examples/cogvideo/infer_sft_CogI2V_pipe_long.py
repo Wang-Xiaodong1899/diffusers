@@ -67,7 +67,7 @@ def extract_frames(mp4_path, output_dir, fps):
 
 def main(val_s: int=0, val_e: int=10, rollout: int=10):
 
-    pretrained_model_name_or_path = "/data/wuzhirong/hf-models/CogVideoX-5b-I2V"
+    pretrained_model_name_or_path = "/workspace/wxd/CogVideoX-5b-I2V"
     
     tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path, subfolder="tokenizer", revision=None, 
