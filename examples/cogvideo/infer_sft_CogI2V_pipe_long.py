@@ -1,6 +1,6 @@
 import os
 import sys
-sys.path.append("/workspace/wxd/diffusers/src")
+sys.path.append("/workspace/wxd/diffusers/src1")
 
 import torch
 from diffusers import (
