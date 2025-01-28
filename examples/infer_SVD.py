@@ -58,7 +58,7 @@ decoding_t: int = 3
 device: str = "cuda"
 
 generator = torch.manual_seed(42)
-output_folder = "/test_SVD"
+output_folder = "./test_SVD"
 os.makedirs(output_folder, exist_ok=True)
 base_count = 0
 video_path = os.path.join(output_folder, f"{base_count:06d}.mp4")
