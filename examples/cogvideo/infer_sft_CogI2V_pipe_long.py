@@ -65,7 +65,7 @@ def extract_frames(mp4_path, output_dir, fps):
     video.release()
     # print(f"Extracted {saved_count} frames to {output_dir}")
 
-def main(val_s: int=0, val_e: int=10, rollout: int=10):
+def main(val_s: int=0, val_e: int=10, rollout: int=3):
 
     pretrained_model_name_or_path = "/workspace/wxd/CogVideoX-5b-I2V"
     
@@ -123,14 +123,14 @@ def main(val_s: int=0, val_e: int=10, rollout: int=10):
             encode_prompt=None,
         )
     
-    root_dir = "/volsparse3/wxd/ICML/Ablation/CogI2V"
+    root_dir = "/volsparse3/wxd/ICML/Ablation/CogI2V-roll3_5item"
     
     os.makedirs(root_dir, exist_ok=True)
 
     for i in tqdm(range(val_s, val_e)): # each scene
         item = train_dataset[i] # total samples in a scene
         # if have 5 samples, cur_item_nums = 5
-        key_indexs = range(1)
+        key_indexs = range(5)
         for key_idx in tqdm(key_indexs):
             key_frame = item[key_idx]
             pil_videos = key_frame["instance_video"]
