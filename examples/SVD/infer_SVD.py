@@ -99,7 +99,7 @@ def main(val_s: int=0, val_e: int=10, rollout: int=5):
             generator = torch.manual_seed(42)
             
             for ridx in tqdm(range(rollout)):
-                image = load_image(first_frame_path) if ridx==0 else total_frames[-1],
+                image = load_image(first_frame_path) if ridx==0 else total_frames[-1]
                 image = resize_image(image)
                 frames = pipe(image, decode_chunk_size=decoding_t, generator=generator, motion_bucket_id=motion_bucket_id, noise_aug_strength=0.1, num_frames=25).frames[0]
 
