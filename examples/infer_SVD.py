@@ -1,3 +1,6 @@
+import sys
+sys.path.append("/workspace/wxd/diffusers/src")
+
 import spaces
 import torch
 import os
