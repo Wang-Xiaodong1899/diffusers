@@ -97,9 +97,6 @@ def main(val_s: int=0, val_e: int=10, rollout: int=5):
             cond_aug = 0.02
             decoding_t = 3
             generator = torch.manual_seed(42)
-
-            image = resize_image(image)
-
             
             for ridx in tqdm(range(rollout)):
                 image = load_image(first_frame_path) if ridx==0 else total_frames[-1],
