@@ -46,25 +46,12 @@ import json
 
 
 def main(
-        tgt_dirs=[
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s10-e20/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s20-e30/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s30-e40/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s40-e50/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s50-e60/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s60-e70/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s70-e80/interpolation',
-            '/data/wangxd/ckpt/cogvideox-A4-clean-image-fft-ckpt-distill-explicit-L2-hf-loss-0111-infer-step100-FVD-s80-e90/interpolation',
-            '/data/wangxd/ckpt/interpolation-s90-e150/s90-e100','/data/wangxd/ckpt/interpolation-s90-e150/s100-e110',
-            '/data/wangxd/ckpt/interpolation-s90-e150/s110-e120','/data/wangxd/ckpt/interpolation-s90-e150/s120-e130',
-            '/data/wangxd/ckpt/interpolation-s90-e150/s130-e140','/data/wangxd/ckpt/interpolation-s90-e150/s140-e150'
-            ],
+        tgt_dir='/data/wangxd/IJCAI25/Ablation/CogI2V',
         version = None,
         split='val',
         num_frames=8,
         i3d_device='cuda:3',
-        device="cuda:3",
+        device="cuda:6",
         eval_frames=24,
         skip_gt = 0,
         skip_pred = 0,
@@ -72,14 +59,14 @@ def main(
                      ,(10, 20), (20,30), (30, 40), (40, 50), (50,60), (60, 70),(70, 80), (80,90), (90, 100), (100, 110), (110, 120), (120, 130), (130, 140), (140, 150)
                      ],
         samples_per_scene=5,
-        gt_image_start=73,
+        gt_image_start=0,
 ):
     # [40, 50], [60, 70]
 
     # if version is None:
     #     version = os.path.basename(tgt_dir)+f'_F{num_frames}'
     
-    print(f'eval videos at {tgt_dirs}')
+    print(f'eval videos at {tgt_dir}')
     # load fvd model
     # i3d_model = load_fvd_model(i3d_device)
     # print('loaded i3d_model')
@@ -112,20 +99,18 @@ def main(
 
     # read syn videos
     syn_videos = []
-    for tgt_dir in tgt_dirs:
-        if os.path.basename(tgt_dir) == "interpolation":
-            num_tgt_dir = os.path.join(os.path.dirname(tgt_dir), "interpolation-f6-e11") # seek files in this, then find the first clip
-        else:
-            num_tgt_dir = os.path.join(tgt_dir, "interpolation-f6-e11")
-        
-        # 5 samples in interpolation-f6-e11
-        
-        video_files = os.listdir(num_tgt_dir) # seek files in this, then find the first clip
+    scenes = range(150)
+    for scene in scenes:
+        # 5 samples
+        cur_dir = os.path.join(tgt_dir, f"{scene}") # append
+        if not os.path.exists(cur_dir):
+            continue
+        video_files = os.listdir(cur_dir) # seek files in this, then find the first clip
         video_tensor = []
         for file in tqdm(video_files):
             if file.split('.')[-1] == 'mp4':
                 # NOTE first short video, only the 25 frames
-                video_arr = mp4toarr(os.path.join(num_tgt_dir, file), resize=False, convert=True)
+                video_arr = mp4toarr(os.path.join(cur_dir, file), resize=False, convert=True)
                 pil_videos = []
                 for im_arr in video_arr:
                     pil_im = preprocess_image(Image.fromarray(im_arr))
@@ -146,8 +131,8 @@ def main(
                 
                 # split 13+12+12+12 into 24+24
                 new_pil_videos = []
-                new_pil_videos.extend(pil_videos[-eval_frames*2:-eval_frames])
-                new_pil_videos.extend(pil_videos[-eval_frames:])
+                new_pil_videos.extend(pil_videos[gt_image_start: gt_image_start+eval_frames])
+                # new_pil_videos.extend(pil_videos[gt_image_start+eval_frames: gt_image_start+eval_frames*2])
                 
                 # videotensor = [transform(im) for im in pil_videos[:eval_frames]]
                 videotensor = [transform(im) for im in new_pil_videos[:eval_frames]]
@@ -193,12 +178,12 @@ def main(
                 
                 pil_videos = [preprocess_image(im) for im in pil_videos]
                 
-                print(f"frames per video {len(pil_videos[gt_image_start: gt_image_start+2*eval_frames])}")
+                # print(f"frames per video {len(pil_videos[gt_image_start: gt_image_start+2*eval_frames])}")
                 
                 # split 48 to 24+24
                 new_pil_videos = []
                 new_pil_videos.extend(pil_videos[gt_image_start: gt_image_start+eval_frames])
-                new_pil_videos.extend(pil_videos[gt_image_start+eval_frames: gt_image_start+2*eval_frames])
+                # new_pil_videos.extend(pil_videos[gt_image_start+eval_frames: gt_image_start+2*eval_frames])
                 
 
                 videotensor = [transform(im) for im in new_pil_videos[:eval_frames]]

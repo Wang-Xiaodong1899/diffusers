@@ -129,8 +129,8 @@ def main(
                 
                 # split 13+12+12+12 into 24+24
                 new_pil_videos = []
-                new_pil_videos.extend(pil_videos[-eval_frames*2:-eval_frames])
-                new_pil_videos.extend(pil_videos[-eval_frames:])
+                new_pil_videos.extend(pil_videos[gt_image_start: gt_image_start+eval_frames])
+                new_pil_videos.extend(pil_videos[gt_image_start+eval_frames: gt_image_start+eval_frames*2])
                 
                 # videotensor = [transform(im) for im in pil_videos[:eval_frames]]
                 videotensor = [transform(im) for im in new_pil_videos[:eval_frames]]
