@@ -56,7 +56,9 @@ def main(
         skip_gt = 0,
         skip_pred = 0,
         val_array = [(0,10)
-                     ,(10, 20), (20,30), (30, 40), (40, 50), (50,60), (60, 70),(70, 80), (80,90), (90, 100), (100, 110), (110, 120), (120, 130), (130, 140), (140, 150)
+                     ,(10, 20), (20,30), 
+                    (30, 40), 
+                    # (40, 50), (50,60), (60, 70),(70, 80), (80,90), (90, 100), (100, 110), (110, 120), (120, 130), (130, 140), (140, 150)
                      ],
         samples_per_scene=5,
         gt_image_start=73,
@@ -99,7 +101,8 @@ def main(
 
     # read syn videos
     syn_videos = []
-    scenes = range(150)
+    # scenes = range(150)
+    scenes = range(40)
     for scene in scenes:
         # 5 samples
         cur_dir = os.path.join(tgt_dir, f"{scene}")
@@ -205,6 +208,7 @@ def main(
                 video_tensor = []
             
     
+    print(f"sync video num: {count_sync}")
     print(f"real video num: {real_num}")
     # real_videos = []
     # for item in tqdm(meta_data):

@@ -26,8 +26,8 @@ def main(val_s: int=0, val_e: int=10, rollout: int=5):
             encode_prompt=None,
         )
     
-    root_dir = "/data/wangxd/IJCAI25/Ablation/I2VGen-XL_roll5_item5"
-    # root_dir = "./test1"
+    # root_dir = "/data/wangxd/IJCAI25/Ablation/I2VGen-XL_roll5_item5"
+    root_dir = "./test1"
     num_frames = 25
     
     os.makedirs(root_dir, exist_ok=True)

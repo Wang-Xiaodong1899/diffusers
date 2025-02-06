@@ -123,7 +123,8 @@ def main(val_s: int=0, val_e: int=10, rollout: int=3):
             encode_prompt=None,
         )
     
-    root_dir = "/data/wangxd/IJCAI25/Ablation/CogI2V"
+    # root_dir = "/data/wangxd/IJCAI25/Ablation/CogI2V"
+    root_dir = "./CogI2V_test"
     
     os.makedirs(root_dir, exist_ok=True)
 
@@ -164,7 +165,7 @@ def main(val_s: int=0, val_e: int=10, rollout: int=3):
                     "use_dynamic_cfg": True,
                     "height": 480,
                     "width": 720,
-                    "num_frames": 49 # 49 frames, 49+48*2
+                    "num_frames": 25 # 49 frames, 49+48*2
                 }
                 frames = pipe(**pipeline_args).frames[0]
                 total_frames.extend(frames if ridx==(rollout-1) else frames[:-1])
