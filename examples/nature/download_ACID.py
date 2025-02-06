@@ -84,15 +84,15 @@ class DataDownloader:
         self.mode =  mode
 
         self.isDone = False
-        if not os.path.exists(self.output_root):
-            os.makedirs(self.output_root)
-        else:
-            print("[INFO] The output dir has already existed.")
-            self.isDone = True
+        # if not os.path.exists(self.output_root):
+        #     os.makedirs(self.output_root)
+        # else:
+        #     print("[INFO] The output dir has already existed.")
+        #     self.isDone = True
 
         self.list_data = []
         if not self.isDone:
-            for txt_file in self.list_seqnames[:1500]:
+            for txt_file in self.list_seqnames[:10]:
                 dir_name = txt_file.split('/')[-1]
                 seq_name = dir_name.split('.')[0]
 
@@ -136,7 +136,7 @@ class DataDownloader:
             print("[INFO] Downloading {} ".format(data.url))
             if 1 :
                 # sometimes this fails because of known issues of pytube and unknown factors
-                yt = YouTube(data.url)
+                yt = YouTube(data.url, client="WEB")
                 # stream = yt.streams.first()
                 # stream.download('./','current_'+mode)
                 stream = yt.streams.filter(res='720p').first().download('./','current_'+mode)
