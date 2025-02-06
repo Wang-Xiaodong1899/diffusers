@@ -9,7 +9,7 @@ from skimage import io
 import cv2
 
 from multiprocessing import Pool
-from pytube import YouTube
+from pytubefix import YouTube
 from time import sleep
 
 class Data:
