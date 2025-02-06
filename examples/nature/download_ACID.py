@@ -134,18 +134,18 @@ class DataDownloader:
 
         for global_count, data in enumerate(self.list_data):
             print("[INFO] Downloading {} ".format(data.url))
-            try :
+            if 1 :
                 # sometimes this fails because of known issues of pytube and unknown factors
                 yt = YouTube(data.url)
                 # stream = yt.streams.first()
                 # stream.download('./','current_'+mode)
                 stream = yt.streams.filter(res='720p').first().download('./','current_'+mode)
-            except :
-                failure_log = open('failed_videos_'+mode+'.txt', 'a')
-                for seqname in data.list_seqnames:
-                    failure_log.writelines(seqname + '\n')
-                failure_log.close()
-                continue
+            # except :
+            #     failure_log = open('failed_videos_'+mode+'.txt', 'a')
+            #     for seqname in data.list_seqnames:
+            #         failure_log.writelines(seqname + '\n')
+            #     failure_log.close()
+            #     continue
 
             sleep(1)
 
