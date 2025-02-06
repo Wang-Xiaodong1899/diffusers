@@ -35,8 +35,9 @@ def process(data, seq_id, videoname, output_root):
     if not os.path.exists(output_root + seqname):
         os.makedirs(output_root + seqname)
     else:
-        print("[INFO] Something Wrong, stop process")
-        return True
+        pass
+        # print("[INFO] Something Wrong, stop process")
+        # return True
 
     list_str_timestamps = []
     for timestamp in data.list_list_timestamps[seq_id]:
