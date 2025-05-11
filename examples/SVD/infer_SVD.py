@@ -54,12 +54,12 @@ def resize_image(image, output_size=(1024, 576)):
 
 def main(val_s: int=0, val_e: int=10, rollout: int=5):
     pipe = StableVideoDiffusionPipeline.from_pretrained(
-        "/volsparse3/wxd/models/stable-video-diffusion-img2vid-xt", torch_dtype=torch.float16, variant="fp16"
+        "/data2/wangxd/models/stable-video-diffusion-img2vid-xt", torch_dtype=torch.float16, variant="fp16"
     )
     pipe.to("cuda")
     print('Pipeline loaded!')
     train_dataset = NuscenesDatasetAllframesFPS10OneByOneForValidate(
-            data_root="/volsparse3/wxd/data/nuscenes",
+            data_root="/data/wangxd/nuscenes",
             height=480,
             width=720,
             max_num_frames=2,
